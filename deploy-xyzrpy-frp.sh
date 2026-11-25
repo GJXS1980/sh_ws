@@ -6,10 +6,14 @@ umask 077
 DOMAIN=xyzrpy.com
 PUBLIC_IP=167.179.99.196
 CONTROL_PORT=7007
+VHOST_HTTP_PORT=8087
 FRP_VERSION=0.72.0
 FRPS_UNIT=xyzrpy-frps.service
-FRPS_DIR=/etc/xyzrpy-frp
-FRPS_BIN="/opt/xyzrpy-frp/$FRP_VERSION/frps"
+# FRPS 安装目录：amd64 对应 /root/frp_ws/frp_0.72.0_linux_amd64
+FRP_BASE_DIR=/root/frp_ws
+FRPS_DIR=
+FRPS_BIN=
+FRPS_CONFIG=
 SITE=/etc/nginx/conf.d/xyzrpy-frp.conf
 WEBROOT=/var/www/xyzrpy-frp-acme
 CERT_NAME=xyzrpy-frp
@@ -31,7 +35,7 @@ die() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
 log() { printf '%s\n' "$*"; }
 usage() {
     cat <<'EOF'
-Usage: sudo bash deploy-xyzrpy-frp.sh --email EMAIL [options]
+Usage: sudo bash <脚本文件名> --email EMAIL [options]
 
 Ubuntu 22.04+ with systemd, amd64 or arm64.
   --ssh-port PORT         Keep this VPS SSH port open (repeatable).
@@ -48,6 +52,7 @@ Ubuntu 22.04+ with systemd, amd64 or arm64.
 Default HTTPS routes (xyzrpy.com): @ and www -> 8091, pan -> 8081,
 note -> 1995, book -> 1090, netron -> 1418, img -> 8000, docs -> 2726,
 codediff -> 4173. Default UFW openings: VPS SSH, 80, 443, 7007 TCP.
+FRP HTTP vhost listens on 127.0.0.1:8087; it is not opened to the public network.
 The original frpc.ini connects to TCP 7007 with its existing settings.
 EOF
 }
@@ -172,23 +177,39 @@ configure_firewall() {
 
 render_frps_config() {
     local port
-    printf '%s\n' "$MARKER" 'bindAddr = "0.0.0.0"' "bindPort = $CONTROL_PORT" \
-        'proxyBindAddr = "127.0.0.1"' 'allowPorts = ['
+    # FRP 0.72.0 使用 TOML 配置格式，不使用旧版 [common] INI 写法。
+    printf '%s\n' \
+        "$MARKER" \
+        '# FRPC 连接 FRPS 使用的服务端监听地址和端口' \
+        'bindAddr = "0.0.0.0"' \
+        "bindPort = $CONTROL_PORT" \
+        '# FRP 原生 HTTP 虚拟主机监听端口' \
+        "vhostHTTPPort = $VHOST_HTTP_PORT" \
+        '# TCP/HTTP 代理监听在本机回环地址，由 Nginx 反向代理访问' \
+        'proxyBindAddr = "127.0.0.1"' \
+        'allowPorts = ['
     for port in "${PORTS[@]}"; do printf '    { single = %s },\n' "$port"; done
-    # The supplied legacy frpc.ini has no token and may use older TLS defaults.
-    printf '%s\n' ']' 'log.to = "console"' 'auth.method = "token"' \
-        'auth.token = ""' 'transport.tls.force = false'
+    # 当前 frpc.ini 未设置 token，因此这里保持空 token 以兼容现有客户端。
+    printf '%s\n' \
+        ']' \
+        'log.to = "console"' \
+        'auth.method = "token"' \
+        'auth.token = ""' \
+        'transport.tls.force = false'
 }
 
 install_frps() {
     local digest=$2 folder="frp_${FRP_VERSION}_linux_$1"
     local changed=0
-    assert_managed "$FRPS_DIR/frps.toml"
+    assert_managed "$FRPS_CONFIG"
     assert_managed "/etc/systemd/system/$FRPS_UNIT"
-    if ! systemctl is-active --quiet "$FRPS_UNIT" &&
-        [[ -n "$(ss -H -ltn "sport = :$CONTROL_PORT")" ]]; then
-        die "TCP $CONTROL_PORT is already listening. Inspect with ss -ltnp."
-    fi
+    local listen_port
+    for listen_port in "$CONTROL_PORT" "$VHOST_HTTP_PORT"; do
+        if ! systemctl is-active --quiet "$FRPS_UNIT" &&
+            [[ -n "$(ss -H -ltn "sport = :$listen_port")" ]]; then
+            die "TCP $listen_port is already listening. Inspect with ss -ltnp."
+        fi
+    done
 
     if [[ ! -x "$FRPS_BIN" ]]; then
         curl --fail --silent --show-error --location --retry 3 --connect-timeout 15 \
@@ -202,31 +223,33 @@ install_frps() {
         changed=1
     fi
 
+    # 创建 FRPS 版本目录，配置文件仅允许 root 读取和修改。
+    install -d -m 0755 "$FRP_BASE_DIR"
     install -d -m 0700 "$FRPS_DIR"
     render_frps_config > "$TMP/frps.toml"
     "$FRPS_BIN" verify -c "$TMP/frps.toml"
 
+    # 按用户提供的 systemd 参数运行 FRPS，并设置开机自启动和异常自动重启。
     cat > "$TMP/frps.service" <<EOF
 $MARKER
 [Unit]
-Description=FRP server for xyzrpy.com
+Description=FRP Server Service
 After=network.target
+Wants=network.target
 
 [Service]
-DynamicUser=yes
-LoadCredential=frps.toml:$FRPS_DIR/frps.toml
-ExecStart=$FRPS_BIN -c \${CREDENTIALS_DIRECTORY}/frps.toml
-Restart=on-failure
-RestartSec=3s
-AmbientCapabilities=CAP_NET_BIND_SERVICE
-CapabilityBoundingSet=CAP_NET_BIND_SERVICE
-NoNewPrivileges=yes
+Type=simple
+User=root
+WorkingDirectory=$FRPS_DIR
+ExecStart=$FRPS_BIN -c $FRPS_CONFIG
+Restart=always
+RestartSec=5
 
 [Install]
 WantedBy=multi-user.target
 EOF
-    if ! cmp -s "$TMP/frps.toml" "$FRPS_DIR/frps.toml"; then
-        write_managed "$TMP/frps.toml" "$FRPS_DIR/frps.toml" 0600
+    if ! cmp -s "$TMP/frps.toml" "$FRPS_CONFIG"; then
+        write_managed "$TMP/frps.toml" "$FRPS_CONFIG" 0600
         changed=1
     fi
     if ! cmp -s "$TMP/frps.service" "/etc/systemd/system/$FRPS_UNIT"; then
@@ -239,12 +262,13 @@ EOF
     local attempt
     for attempt in {1..10}; do
         if systemctl is-active --quiet "$FRPS_UNIT" &&
-            ( : > "/dev/tcp/127.0.0.1/$CONTROL_PORT" ) 2>/dev/null; then
+            ( : > "/dev/tcp/127.0.0.1/$CONTROL_PORT" ) 2>/dev/null &&
+            ( : > "/dev/tcp/127.0.0.1/$VHOST_HTTP_PORT" ) 2>/dev/null; then
             return 0
         fi
         sleep 1
     done
-    die "FRP did not open TCP $CONTROL_PORT. Run: journalctl -u $FRPS_UNIT -n 50"
+    die "FRPS 未能正常监听控制端口 $CONTROL_PORT 或 HTTP 虚拟主机端口 $VHOST_HTTP_PORT。请执行：journalctl -u $FRPS_UNIT -n 50"
 }
 
 configure_direct_tcp() {
@@ -334,7 +358,7 @@ render_site() {
     [[ "$mode" == tls ]] || return 0
     cat <<'EOF'
 
-# HTTPS virtual hosts
+# HTTPS 虚拟主机配置
 map $http_upgrade $xyzrpy_frp_connection {
     default upgrade;
     '' close;
@@ -435,12 +459,12 @@ configure_https() {
         render_site http > "$TMP/http.conf"
         apply_site "$TMP/http.conf" http
     fi
-    # The existing TLS site may lack newly added names. Stage a complete HTTP
-    # vhost while reusing the last HTTPS blocks until the certificate is issued.
+    # 如果已有 TLS 站点缺少新增域名，先生成完整的 HTTP 验证配置，
+    # 并在证书签发前暂时保留原有 HTTPS 配置，避免中断已有站点。
     if ! probe_hosts http 80; then
         render_site http > "$TMP/http.conf"
         if [[ -s "$CERT_DIR/fullchain.pem" && -s "$CERT_DIR/privkey.pem" && -f "$SITE" ]]; then
-            sed -n '/^# HTTPS virtual hosts$/,$p' "$SITE" >> "$TMP/http.conf"
+            sed -n '/^# HTTPS 虚拟主机配置$/,$p' "$SITE" >> "$TMP/http.conf"
         fi
         apply_site "$TMP/http.conf" http
     fi
@@ -449,7 +473,7 @@ configure_https() {
         --non-interactive --agree-tos --email "$EMAIL" --keep-until-expiring "${cert_args[@]}"
 
     local hook=/etc/letsencrypt/renewal-hooks/deploy/xyzrpy-frp-nginx
-    # The managed-file marker follows the interpreter line for an executable hook.
+    # 可执行 Hook 的管理标记必须放在解释器声明之后，便于安全识别和更新。
     if [[ -e "$hook" || -L "$hook" ]]; then
         [[ ! -L "$hook" && -f "$hook" && "$(sed -n '2p' "$hook")" == "$MARKER" ]] \
             || die "Existing Certbot hook is not owned by this script: $hook"
@@ -487,6 +511,10 @@ main() {
         arm64) architecture=arm64; digest=02180b857480302fd934e9ddbd50fe2f73229f99062f88756abc6de9df5e95cf ;;
         *) die "Supported architectures are amd64 and arm64." ;;
     esac
+    # amd64 主机将使用用户指定的精确目录：/root/frp_ws/frp_0.72.0_linux_amd64。
+    FRPS_DIR="$FRP_BASE_DIR/frp_${FRP_VERSION}_linux_${architecture}"
+    FRPS_BIN="$FRPS_DIR/frps"
+    FRPS_CONFIG="$FRPS_DIR/frps.toml"
 
     exec 9>/run/lock/xyzrpy-frp-deploy.lock
     flock -n 9 || die "Another deployment is running."
@@ -514,6 +542,8 @@ main() {
 
     configure_direct_tcp
     log "FRP control: $PUBLIC_IP:$CONTROL_PORT"
+    log "FRP HTTP vhost (loopback): 127.0.0.1:$VHOST_HTTP_PORT"
+    log "FRPS config: $FRPS_CONFIG"
     log 'Start frpc with your existing frpc.ini.'
     log "VPS checks: systemctl status $FRPS_UNIT nginx certbot.timer; ufw status"
     local host
