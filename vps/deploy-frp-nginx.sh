@@ -56,14 +56,15 @@ Ubuntu 22.04+ or Debian 11 with systemd, amd64 or arm64.
                           HTTPS upstreams need a trusted cert matching HOST.
   --direct-tcp PORT[,PORT...]
                           Also expose the selected FRP TCP ports on VPS IPv4.
-                          Openings persist across runs. Default is no new openings.
+                          Public listeners persist across runs.
   --direct-bind-ip IP     Local VPS interface IPv4 for direct TCP (default 45.32.181.43).
   --help                  Show this help.
 
 Default HTTPS routes (xyzrpy.com): @ and www -> 8091, pan -> 8081,
 note -> 1995, book -> 1090, netron -> 1418, img -> 8000, docs -> 2726,
-codediff -> 4173. Default UFW openings: VPS SSH, 80, 443, 7007 TCP.
-FRP HTTP vhost listens on 127.0.0.1:8087; it is not opened to the public network.
+codediff -> 4173.
+UFW allows TCP for VPS SSH, 80, 443, 8087, 7007, and all FRP remote ports.
+The FRP HTTP vhost listens on 127.0.0.1:8087.
 The original frpc.ini connects to TCP 7007 with its existing settings.
 EOF
 }
@@ -183,12 +184,13 @@ configure_firewall() {
     } | awk -F: 'NF > 1 {print $NF}')
     if (( ${#SSH_PORTS[@]} == 0 )); then SSH_PORTS[22]=1; fi
 
-    for port in "${!SSH_PORTS[@]}" 80 443 "$CONTROL_PORT"; do
+    for port in "${!SSH_PORTS[@]}" 80 443 "$VHOST_HTTP_PORT" "$CONTROL_PORT" "${PORTS[@]}"; do
         ufw allow "$port/tcp"
     done
     if ! ufw status | grep -Fx 'Status: active' >/dev/null; then
         ufw --force enable
     fi
+    ufw reload
 }
 
 render_frps_config() {
@@ -370,7 +372,6 @@ EOF
             write_managed "$TMP/direct.service" "/etc/systemd/system/$base.service" 0644
             systemctl daemon-reload
         fi
-        ufw allow "$port/tcp"
         if ! systemctl enable --now "$base.socket"; then
             die "Cannot listen on $DIRECT_BIND_IP:$port. Inspect with ss -ltnp and journalctl -u $base.socket."
         fi
