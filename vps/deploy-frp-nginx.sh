@@ -21,6 +21,9 @@ FRPS_DIR=
 FRPS_BIN=
 FRPS_CONFIG=
 SITE=/etc/nginx/conf.d/xyzrpy-frp.conf
+HALO_SITE=/etc/nginx/sites-available/halo
+HALO_ENABLED=/etc/nginx/sites-enabled/halo
+HALO_CERT_DIR="/etc/letsencrypt/live/$DOMAIN"
 WEBROOT=/var/www/xyzrpy-frp-acme
 CERT_NAME=xyzrpy-frp
 CERT_DIR="/etc/letsencrypt/live/$CERT_NAME"
@@ -134,9 +137,11 @@ assert_managed() {
 write_managed() {
     local source=$1 path=$2 mode=$3 temporary
     assert_managed "$path"
-    temporary=$(mktemp "${path%/*}/.xyzrpy-frp.XXXXXX")
-    install -m "$mode" "$source" "$temporary"
-    mv -fT -- "$temporary" "$path"
+    temporary=$(mktemp "${path%/*}/.xyzrpy-frp.XXXXXX") || return 1
+    if ! install -m "$mode" "$source" "$temporary" || ! mv -fT -- "$temporary" "$path"; then
+        rm -f -- "$temporary"
+        return 1
+    fi
 }
 
 check_dns() {
@@ -384,6 +389,10 @@ EOF
 
 render_site() {
     local mode=$1 host port scheme ipv6_http= ipv6_tls=
+    local -a hosts=()
+    for host in "${HOSTS[@]}"; do
+        [[ "$host" == "$DOMAIN" || "$host" == "www.$DOMAIN" ]] || hosts+=("$host")
+    done
     # 始终保留 HTTP 证书验证路径。证书就绪后再启用 HTTPS 和跳转。
     if [[ -r /proc/net/if_inet6 ]] && read -r _ < /proc/net/if_inet6; then
         ipv6_http='    listen [::]:80;'
@@ -391,11 +400,11 @@ render_site() {
     fi
 
     printf '%s\n' "$MARKER"
-    printf 'server {\n    listen 80;\n%s\n    server_name %s;\n' "$ipv6_http" "${HOSTS[*]}"
+    printf 'server {\n    listen 80;\n%s\n    server_name %s;\n' "$ipv6_http" "${hosts[*]}"
     challenge_location
     if [[ "$mode" == tls ]]; then
         printf '%s\n' '    location / {'
-        for host in "${HOSTS[@]}"; do
+        for host in "${hosts[@]}"; do
             printf '        if ($host = %s) { return 301 https://%s$request_uri; }\n' "$host" "$host"
         done
         printf '%s\n' '        return 404;' '    }'
@@ -413,7 +422,7 @@ map $http_upgrade $xyzrpy_frp_connection {
     '' close;
 }
 EOF
-    for host in "${HOSTS[@]}"; do
+    for host in "${hosts[@]}"; do
         port=${UPSTREAM[$host]}
         scheme=${SCHEME[$host]:-http}
         cat <<EOF
@@ -458,6 +467,74 @@ EOF
     done
 }
 
+# 生成 Halo 的 TLS 站点。默认两个域名共用一个代理块；
+# 如果显式传入不同的 --route，则分别使用各自的上游。
+render_halo_tls() {
+    local host=$1 names=$2 ipv6_tls=$3
+    local port=${UPSTREAM[$host]} scheme=${SCHEME[$host]:-http}
+    cat <<EOF
+server {
+    listen 443 ssl;
+$ipv6_tls
+    server_name $names;
+    ssl_certificate $HALO_CERT_DIR/fullchain.pem;
+    ssl_certificate_key $HALO_CERT_DIR/privkey.pem;
+    include /etc/letsencrypt/options-ssl-nginx.conf;
+    ssl_dhparam /etc/letsencrypt/ssl-dhparams.pem;
+    client_max_body_size 512m;
+EOF
+    challenge_location
+    cat <<EOF
+    location / {
+        proxy_pass $scheme://127.0.0.1:$port;
+        proxy_http_version 1.1;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_read_timeout 300s;
+        proxy_send_timeout 300s;
+EOF
+    if [[ "$scheme" == https ]]; then
+        cat <<EOF
+        proxy_ssl_server_name on;
+        proxy_ssl_name \$host;
+        proxy_ssl_verify on;
+        proxy_ssl_verify_depth 3;
+        proxy_ssl_trusted_certificate /etc/ssl/certs/ca-certificates.crt;
+EOF
+    fi
+    printf '    }\n}\n'
+}
+
+render_halo() {
+    local mode=$1 www="www.$DOMAIN" ipv6_http= ipv6_tls=
+    if [[ -r /proc/net/if_inet6 ]] && read -r _ < /proc/net/if_inet6; then
+        ipv6_http='    listen [::]:80;'
+        ipv6_tls='    listen [::]:443 ssl;'
+    fi
+    printf '%s\n' "$MARKER"
+    printf 'server {\n    listen 80;\n%s\n    server_name %s %s;\n' "$ipv6_http" "$DOMAIN" "$www"
+    # ACME 验证请求直接读取文件，其余请求在证书就绪后跳转到 HTTPS。
+    challenge_location
+    if [[ "$mode" == tls ]]; then
+        printf '%s\n' '    location / { return 301 https://$host$request_uri; }'
+    else
+        printf '%s\n' '    location / { return 404; }'
+    fi
+    printf '}\n'
+    [[ "$mode" == tls ]] || return 0
+    printf '\n%s\n' '# HTTPS 虚拟主机配置'
+    if [[ "${UPSTREAM[$DOMAIN]}:${SCHEME[$DOMAIN]:-http}" == "${UPSTREAM[$www]}:${SCHEME[$www]:-http}" ]]; then
+        render_halo_tls "$DOMAIN" "$DOMAIN $www" "$ipv6_tls"
+    else
+        render_halo_tls "$DOMAIN" "$DOMAIN" "$ipv6_tls"
+        render_halo_tls "$www" "$www" "$ipv6_tls"
+    fi
+}
+
 probe_hosts() {
     local scheme=$1 port=$2 host response
     for host in "${HOSTS[@]}"; do
@@ -469,58 +546,102 @@ probe_hosts() {
 }
 
 apply_site() {
-    local file=$1 mode=$2 previous="$TMP/previous.conf" had_previous=0 activated=0
-    # 保存当前站点。检查 Nginx 配置并逐个探测域名，失败时恢复此前的站点文件。
+    local file=$1 halo_file=$2 mode=$3 previous="$TMP/previous.conf"
+    local had_previous=0 had_halo=0 had_link=0
+    # 两份配置一起验证和重载，迁移时避免同一个域名被声明两次。
     assert_managed "$SITE"
+    assert_managed "$HALO_SITE"
+    if [[ -L "$HALO_ENABLED" ]]; then
+        [[ "$(readlink -m -- "$HALO_ENABLED")" == "$HALO_SITE" ]] \
+            || die "现有 Halo 启用链接指向其他文件：$HALO_ENABLED"
+        had_link=1
+    elif [[ -e "$HALO_ENABLED" ]]; then
+        die "Halo 启用路径已被占用：$HALO_ENABLED"
+    fi
     if [[ -e "$SITE" ]]; then cp -p -- "$SITE" "$previous"; had_previous=1; fi
-    write_managed "$file" "$SITE" 0644
+    if [[ -e "$HALO_SITE" ]]; then cp -p -- "$HALO_SITE" "$TMP/previous-halo"; had_halo=1; fi
 
-    if nginx -T > "$TMP/nginx-config" 2> "$TMP/nginx-diagnostics" &&
+    if write_managed "$file" "$SITE" 0644 &&
+        write_managed "$halo_file" "$HALO_SITE" 0644 &&
+        { (( had_link )) || ln -s -- "$HALO_SITE" "$HALO_ENABLED"; } &&
+        nginx -T > "$TMP/nginx-config" 2> "$TMP/nginx-diagnostics" &&
         ! grep -Eq 'conflicting server name|duplicate default server' "$TMP/nginx-diagnostics" &&
         grep -Fxq "# configuration file $SITE:" "$TMP/nginx-config" &&
+        grep -Fxq "# configuration file $HALO_ENABLED:" "$TMP/nginx-config" &&
         systemctl enable --now nginx &&
         systemctl reload nginx; then
-        activated=1
         if probe_hosts http 80 && { [[ "$mode" == http ]] || probe_hosts https 443; }; then
             return 0
         fi
         printf 'Nginx could not serve the local %s probe for all requested hosts.\n' "$mode" >&2
     fi
 
-    cat "$TMP/nginx-diagnostics" >&2
+    if [[ -f "$TMP/nginx-diagnostics" ]]; then cat "$TMP/nginx-diagnostics" >&2; fi
     if (( had_previous )); then
         write_managed "$previous" "$SITE" 0644
     else
         rm -f -- "$SITE"
     fi
-    if (( activated )); then nginx -t && systemctl reload nginx || true; fi
+    if (( had_halo )); then
+        write_managed "$TMP/previous-halo" "$HALO_SITE" 0644
+    else
+        rm -f -- "$HALO_SITE"
+    fi
+    if (( ! had_link )); then rm -f -- "$HALO_ENABLED"; fi
+    if systemctl is-active --quiet nginx; then nginx -t && systemctl reload nginx || true; fi
     die "Nginx deployment failed and the site file was restored. Check active vhosts and ports 80/443."
+}
+
+install_halo_tls_options() {
+    local options=/etc/letsencrypt/options-ssl-nginx.conf
+    local dhparams=/etc/letsencrypt/ssl-dhparams.pem source package_files
+    # webroot 签发证书时不会安装 Nginx TLS 模板，缺少时从 Ubuntu 的 Certbot 软件包复制。
+    if [[ ! -s "$options" ]]; then
+        package_files=$(dpkg-query -L python3-certbot-nginx python3-certbot)
+        source=$(awk '/\/tls_configs\/options-ssl-nginx(-tls13)?\.conf$/ {print; exit}' <<< "$package_files")
+        if [[ -z "$source" ]]; then
+            source=$(awk '/\/tls_configs\/options-ssl-nginx-tls13-session-tix-on\.conf$/ {print; exit}' <<< "$package_files")
+        fi
+        [[ -r "$source" ]] || die '未找到 Certbot 提供的 Nginx TLS 模板。'
+        install -m 0644 "$source" "$options"
+    fi
+    if [[ ! -s "$dhparams" ]]; then
+        package_files=$(dpkg-query -L python3-certbot)
+        source=$(awk '/\/ssl-dhparams\.pem$/ {print; exit}' <<< "$package_files")
+        [[ -r "$source" ]] || die '未找到 Certbot 提供的 DH 参数文件。'
+        install -m 0644 "$source" "$dhparams"
+    fi
 }
 
 configure_https() {
     local host
     local -a cert_args=()
     assert_managed "$SITE"
+    assert_managed "$HALO_SITE"
     install -d -m 0755 "$WEBROOT/.well-known/acme-challenge"
     printf '%s\n' "$PROBE_NAME" > "$TMP/probe"
     install -m 0644 "$TMP/probe" "$WEBROOT/.well-known/acme-challenge/$PROBE_NAME"
 
-    if [[ ! -s "$CERT_DIR/fullchain.pem" || ! -s "$CERT_DIR/privkey.pem" || ! -f "$SITE" ]]; then
-        render_site http > "$TMP/http.conf"
-        apply_site "$TMP/http.conf" http
-    fi
-    # 如果已有 TLS 站点缺少新增域名，先生成完整的 HTTP 验证配置，
-    # 并在证书签发前暂时保留原有 HTTPS 配置，避免中断已有站点。
+    # 已能提供全部 HTTP 验证路径时，先签发证书，再一起切换两份站点文件。
     if ! probe_hosts http 80; then
         render_site http > "$TMP/http.conf"
+        render_halo http > "$TMP/halo-http.conf"
+        # 保留可继续使用的 TLS 配置。首次迁移时旧 TLS 块仍由原站点配置提供。
         if [[ -s "$CERT_DIR/fullchain.pem" && -s "$CERT_DIR/privkey.pem" && -f "$SITE" ]]; then
             sed -n '/^# HTTPS 虚拟主机配置$/,$p' "$SITE" >> "$TMP/http.conf"
         fi
-        apply_site "$TMP/http.conf" http
+        if [[ -s "$HALO_CERT_DIR/fullchain.pem" && -s "$HALO_CERT_DIR/privkey.pem" && -L "$HALO_ENABLED" && -f "$HALO_SITE" ]]; then
+            sed -n '/^# HTTPS 虚拟主机配置$/,$p' "$HALO_SITE" >> "$TMP/halo-http.conf"
+        fi
+        apply_site "$TMP/http.conf" "$TMP/halo-http.conf" http
     fi
     for host in "${HOSTS[@]}"; do cert_args+=(-d "$host"); done
     certbot certonly --webroot --webroot-path "$WEBROOT" --cert-name "$CERT_NAME" \
         --non-interactive --agree-tos --email "$EMAIL" --keep-until-expiring "${cert_args[@]}"
+    # Halo 使用指定名称的证书，其他站点继续沿用原来的证书目录。
+    certbot certonly --webroot --webroot-path "$WEBROOT" --cert-name "$DOMAIN" \
+        --non-interactive --agree-tos --email "$EMAIL" --keep-until-expiring -d "$DOMAIN" -d "www.$DOMAIN"
+    install_halo_tls_options
 
     local hook=/etc/letsencrypt/renewal-hooks/deploy/xyzrpy-frp-nginx
     # 可执行 Hook 的管理标记必须放在解释器声明之后，便于安全识别和更新。
@@ -533,14 +654,18 @@ configure_https() {
 #!/bin/sh
 $MARKER
 set -eu
-[ "\${RENEWED_LINEAGE:-}" = "$CERT_DIR" ] || exit 0
+case "\${RENEWED_LINEAGE:-}" in
+    "$CERT_DIR"|"$HALO_CERT_DIR") ;;
+    *) exit 0 ;;
+esac
 /usr/sbin/nginx -t
 /usr/bin/systemctl reload nginx
 EOF
     install -m 0755 "$TMP/reload-nginx" "$hook"
 
     render_site tls > "$TMP/tls.conf"
-    apply_site "$TMP/tls.conf" tls
+    render_halo tls > "$TMP/halo-tls.conf"
+    apply_site "$TMP/tls.conf" "$TMP/halo-tls.conf" tls
     systemctl enable --now certbot.timer
 }
 
@@ -577,7 +702,7 @@ main() {
     log 'Installing Ubuntu packages'
     export DEBIAN_FRONTEND=noninteractive
     apt-get update
-    apt-get install -y ca-certificates curl jq openssl ufw dnsutils iproute2 nginx certbot
+    apt-get install -y ca-certificates curl jq openssl ufw dnsutils iproute2 nginx certbot python3-certbot-nginx
 
     resolve_frp_release "$architecture"
 
