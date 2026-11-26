@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 在 Ubuntu VPS 上部署 FRPS，并通过 Nginx 提供 HTTPS 反向代理。
+# 在 Ubuntu 或 Debian VPS 上部署 FRPS，并通过 Nginx 提供 HTTPS 反向代理。
 # 任一关键命令失败时停止，临时文件和证书探测文件由退出钩子清理。
 set -Eeuo pipefail
 export LC_ALL=C
@@ -48,7 +48,7 @@ usage() {
     cat <<'EOF'
 Usage: sudo bash <脚本文件名> --email EMAIL [options]
 
-Ubuntu 22.04+ with systemd, amd64 or arm64.
+Ubuntu 22.04+ or Debian 11 with systemd, amd64 or arm64.
   --ssh-port PORT         Keep this VPS SSH port open (repeatable).
   --route HOST:PORT[:http|https]
                           Override or add a hostname in xyzrpy.com (repeatable).
@@ -214,7 +214,7 @@ render_frps_config() {
         'transport.tls.force = false'
 }
 
-# 根据 Ubuntu 的包架构和 GitHub 的正式发行版信息确定安装包。
+# 根据系统的包架构和 GitHub 的正式发行版信息确定安装包。
 resolve_frp_release() {
     local architecture=$1
     local release_json="$TMP/frp-release.json" tag asset_name asset_info
@@ -595,7 +595,7 @@ apply_site() {
 install_halo_tls_options() {
     local options=/etc/letsencrypt/options-ssl-nginx.conf
     local dhparams=/etc/letsencrypt/ssl-dhparams.pem source package_files
-    # webroot 签发证书时不会安装 Nginx TLS 模板，缺少时从 Ubuntu 的 Certbot 软件包复制。
+    # webroot 签发证书时不会安装 Nginx TLS 模板，缺少时从 Certbot 软件包复制。
     if [[ ! -s "$options" ]]; then
         package_files=$(dpkg-query -L python3-certbot-nginx python3-certbot)
         source=$(awk '/\/tls_configs\/options-ssl-nginx(-tls13)?\.conf$/ {print; exit}' <<< "$package_files")
@@ -679,10 +679,19 @@ main() {
     parse_args "$@"
     [[ $EUID == 0 ]] || die "Run with sudo."
     . /etc/os-release
-    [[ "${ID:-}" == ubuntu && "${VERSION_ID%%.*}" -ge 22 && -d /run/systemd/system ]] \
-        || die "This script requires Ubuntu 22.04 or later, with systemd running."
+    local os_version=${VERSION_ID:-}
+    case "${ID:-}" in
+        ubuntu)
+            [[ "$os_version" =~ ^[0-9]+\.[0-9]+$ && "${os_version%%.*}" -ge 22 ]] ||
+                die "Ubuntu 22.04 or later is required (detected ${os_version:-unknown})."
+            ;;
+        debian)
+            [[ "$os_version" == 11 ]] || die "Debian 11 is required (detected ${os_version:-unknown})."
+            ;;
+        *) die "Use Ubuntu 22.04 or later, or Debian 11 (detected ${ID:-unknown})." ;;
+    esac
+    [[ -d /run/systemd/system ]] || die "This script requires systemd running."
     local architecture
-    # 脚本依赖 Ubuntu 的 apt、UFW 和 systemd，这里保留原有的平台范围。
     case "$(dpkg --print-architecture)" in
         amd64) architecture=amd64 ;;
         arm64) architecture=arm64 ;;
@@ -699,7 +708,7 @@ main() {
     trap 'exit 143' TERM
     trap 'printf "Deployment stopped at line %s\n" "$LINENO" >&2' ERR
 
-    log 'Installing Ubuntu packages'
+    log 'Installing system packages'
     export DEBIAN_FRONTEND=noninteractive
     apt-get update
     apt-get install -y ca-certificates curl jq openssl ufw dnsutils iproute2 nginx certbot python3-certbot-nginx
