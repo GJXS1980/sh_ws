@@ -9,10 +9,10 @@ DOMAIN=xyzrpy.com
 PUBLIC_IP=45.32.181.43
 CONTROL_PORT=7007
 VHOST_HTTP_PORT=8087
-FRPS_UNIT=xyzrpy-frps.service
-# GitHub 的 latest 接口返回正式发行版及其附件的下载地址和摘要。
-FRP_RELEASE_API=https://api.github.com/repos/fatedier/frp/releases/latest
-# 安装目录按版本和架构区分。查询发布信息后再确定具体路径。
+FRP_VERSION=0.72.0
+FRPS_UNIT=frps.service
+OLD_FRPS_UNIT=xyzrpy-frps.service
+SYSTEMD_UNIT_DIR=/etc/systemd/system
 FRP_BASE_DIR=/root/frp_ws
 FRP_FOLDER=
 FRP_DOWNLOAD_URL=
@@ -29,7 +29,7 @@ CERT_NAME=xyzrpy-frp
 CERT_DIR="/etc/letsencrypt/live/$CERT_NAME"
 # 用管理标记识别本脚本生成的配置，避免覆盖手工维护的站点或服务。
 MARKER='# Managed by deploy-xyzrpy-frp.sh'
-# PORTS 是客户端可申请的代理端口。UPSTREAM 指定各域名对应的本地代理端口。
+# PORTS 是现有 frpc.ini 的代理端口。UPSTREAM 指定各域名对应的本地代理端口。
 PORTS=(2222 1090 1726 1095 1625 1995 8081 30 881 811 812 8091 1418 18789 8000 2726 4173)
 HOSTS=(xyzrpy.com www.xyzrpy.com pan.xyzrpy.com note.xyzrpy.com book.xyzrpy.com
        netron.xyzrpy.com img.xyzrpy.com docs.xyzrpy.com codediff.xyzrpy.com)
@@ -55,7 +55,7 @@ Ubuntu 22.04+ or Debian 11 with systemd, amd64 or arm64.
                           PORT is the FRP remote_port. Scheme defaults to http.
                           HTTPS upstreams need a trusted cert matching HOST.
   --direct-tcp PORT[,PORT...]
-                          Also expose the selected FRP TCP ports on VPS IPv4.
+                          Use loopback FRP proxies with public listeners for the selected ports.
                           Public listeners persist across runs.
   --direct-bind-ip IP     Local VPS interface IPv4 for direct TCP (default 45.32.181.43).
   --help                  Show this help.
@@ -64,7 +64,7 @@ Default HTTPS routes (xyzrpy.com): @ and www -> 8091, pan -> 8081,
 note -> 1995, book -> 1090, netron -> 1418, img -> 8000, docs -> 2726,
 codediff -> 4173.
 UFW allows TCP for VPS SSH, 80, 443, 8087, 7007, and all FRP remote ports.
-The FRP HTTP vhost listens on 127.0.0.1:8087.
+FRP v0.72.0 runs as frps.service. The default HTTP vhost port is 8087.
 The original frpc.ini connects to TCP 7007 with its existing settings.
 EOF
 }
@@ -136,8 +136,12 @@ assert_managed() {
 
 # 在目标文件所在目录写入临时文件，再原子替换脚本管理的配置。
 write_managed() {
+    assert_managed "$2"
+    write_atomic "$@"
+}
+
+write_atomic() {
     local source=$1 path=$2 mode=$3 temporary
-    assert_managed "$path"
     temporary=$(mktemp "${path%/*}/.xyzrpy-frp.XXXXXX") || return 1
     if ! install -m "$mode" "$source" "$temporary" || ! mv -fT -- "$temporary" "$path"; then
         rm -f -- "$temporary"
@@ -194,95 +198,88 @@ configure_firewall() {
 }
 
 render_frps_config() {
-    local port
-    # 服务端配置使用 TOML。allowPorts 列出客户端可申请的 TCP 代理端口。
-    printf '%s\n' \
-        "$MARKER" \
-        '# FRPC 连接 FRPS 使用的服务端监听地址和端口' \
-        'bindAddr = "0.0.0.0"' \
-        "bindPort = $CONTROL_PORT" \
-        '# FRP 原生 HTTP 虚拟主机监听端口' \
-        "vhostHTTPPort = $VHOST_HTTP_PORT" \
-        '# TCP/HTTP 代理监听在本机回环地址，由 Nginx 反向代理访问' \
-        'proxyBindAddr = "127.0.0.1"' \
-        'allowPorts = ['
-    for port in "${PORTS[@]}"; do printf '    { single = %s },\n' "$port"; done
-    # 当前 frpc.ini 未设置 token，因此这里保持空 token 以兼容现有客户端。
-    printf '%s\n' \
-        ']' \
-        'log.to = "console"' \
-        'auth.method = "token"' \
-        'auth.token = ""' \
-        'transport.tls.force = false'
+    if [[ "${1:-}" == loopback ]]; then
+        local port
+        printf '%s\n' "$MARKER" 'bindAddr = "0.0.0.0"' "bindPort = $CONTROL_PORT" \
+            "vhostHTTPPort = $VHOST_HTTP_PORT" 'proxyBindAddr = "127.0.0.1"' 'allowPorts = ['
+        for port in "${PORTS[@]}"; do printf '    { single = %s },\n' "$port"; done
+        printf '%s\n' ']' 'auth.token = ""' 'transport.tls.force = false'
+    else
+        # v0.72.0 根据 [common] 识别旧版 INI 配置，文件名仍使用 frps.toml。
+        printf '%s\n' '[common]' "bind_port = $CONTROL_PORT" "vhost_http_port = $VHOST_HTTP_PORT"
+    fi
 }
 
-# 根据系统的包架构和 GitHub 的正式发行版信息确定安装包。
-resolve_frp_release() {
+configure_frps_paths() {
     local architecture=$1
-    local release_json="$TMP/frp-release.json" tag asset_name asset_info
-
-    curl --fail --silent --show-error --location --retry 3 --connect-timeout 15 \
-        --max-time 60 --header 'Accept: application/vnd.github+json' \
-        --output "$release_json" "$FRP_RELEASE_API" \
-        || die '无法查询 GitHub 上的 frp 最新正式版。'
-
-    # 限制版本标签的格式，确保由它生成的文件名和安装路径合法。
-    tag=$(jq -er '.tag_name | strings | select(test("^v[0-9]+[.][0-9]+[.][0-9]+$"))' "$release_json") \
-        || die 'GitHub 返回的 frp 版本标签无效。'
-    FRP_FOLDER="frp_${tag#v}_linux_${architecture}"
-    asset_name="$FRP_FOLDER.tar.gz"
-
-    # 精确匹配官方附件，读取实际下载地址与 SHA-256 摘要。
-    asset_info=$(jq -er --arg name "$asset_name" '
-        .assets[]
-        | select(.name == $name and .state == "uploaded")
-        | [.browser_download_url, .digest] | @tsv
-    ' "$release_json") || die "最新正式版 $tag 未提供 $asset_name。"
-    IFS=$'\t' read -r FRP_DOWNLOAD_URL FRP_DIGEST <<< "$asset_info"
-    [[ "$FRP_DOWNLOAD_URL" == "https://github.com/fatedier/frp/releases/download/$tag/$asset_name" ]] \
-        || die "附件 $asset_name 的下载地址无效。"
-    [[ "$FRP_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] \
-        || die "附件 $asset_name 缺少有效的 SHA-256 摘要。"
-    FRP_DIGEST=${FRP_DIGEST#sha256:}
-
+    case "$architecture" in
+        amd64) FRP_DIGEST=daf719b32ca2778770bb92955e231a07414d754378b9af328aa2642862479804 ;;
+        arm64) FRP_DIGEST=02180b857480302fd934e9ddbd50fe2f73229f99062f88756abc6de9df5e95cf ;;
+        *) die "Unsupported FRP architecture: $architecture" ;;
+    esac
+    FRP_FOLDER="frp_${FRP_VERSION}_linux_${architecture}"
+    FRP_DOWNLOAD_URL="https://github.com/fatedier/frp/releases/download/v$FRP_VERSION/$FRP_FOLDER.tar.gz"
     FRPS_DIR="$FRP_BASE_DIR/$FRP_FOLDER"
     FRPS_BIN="$FRPS_DIR/frps"
     FRPS_CONFIG="$FRPS_DIR/frps.toml"
-    log "已选定 frp $tag（Linux $architecture），安装目录为 $FRPS_DIR"
+}
+
+matches_frps_file() {
+    [[ -f "$1" && "$(<"$1")" == "$(<"$2")" ]]
+}
+
+assert_known_frps_file() {
+    local path=$1 candidate
+    shift
+    [[ ! -L "$path" ]] || die "Refusing to replace symbolic link $path"
+    [[ -e "$path" ]] || return 0
+    if [[ -f "$path" && "$(head -n 1 "$path")" == "$MARKER" ]]; then return 0; fi
+    for candidate in "$@"; do
+        if matches_frps_file "$path" "$candidate"; then return 0; fi
+    done
+    die "Existing FRP file differs from the deployment configuration: $path"
+}
+
+uses_direct_listeners() {
+    local socket
+    (( ${#DIRECT_PORTS[@]} == 0 )) || return 0
+    for socket in "$SYSTEMD_UNIT_DIR"/xyzrpy-frp-tcp-*.socket; do
+        [[ -f "$socket" && "$(head -n 1 "$socket")" == "$MARKER" ]] || continue
+        if systemctl is-active --quiet "${socket##*/}" ||
+           systemctl is-enabled --quiet "${socket##*/}"; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+wait_for_frps() {
+    local attempt
+    for attempt in {1..10}; do
+        if systemctl is-active --quiet "$FRPS_UNIT" &&
+            ( : > "/dev/tcp/127.0.0.1/$CONTROL_PORT" ) 2>/dev/null &&
+            ( : > "/dev/tcp/127.0.0.1/$VHOST_HTTP_PORT" ) 2>/dev/null; then
+            return 0
+        fi
+        sleep 1
+    done
+    return 1
 }
 
 install_frps() {
-    local changed=0
-    assert_managed "$FRPS_CONFIG"
-    assert_managed "/etc/systemd/system/$FRPS_UNIT"
-    local listen_port
-    for listen_port in "$CONTROL_PORT" "$VHOST_HTTP_PORT"; do
-        if ! systemctl is-active --quiet "$FRPS_UNIT" &&
-            [[ -n "$(ss -H -ltn "sport = :$listen_port")" ]]; then
-            die "TCP $listen_port is already listening. Inspect with ss -ltnp."
-        fi
-    done
+    local changed=0 config_changed=0 migrate=0 old_active=0 listen_port
+    local unit="$SYSTEMD_UNIT_DIR/$FRPS_UNIT" old_unit="$SYSTEMD_UNIT_DIR/$OLD_FRPS_UNIT"
+    local archive="$TMP/$FRP_FOLDER.tar.gz" cached="${FRP_BASE_DIR%/*}/$FRP_FOLDER.tar.gz"
+    local source_bin="$FRPS_BIN" action=start
 
-    # 同一版本已经安装时复用 frps。发现新版本时下载到临时目录，
-    # 核对摘要后只提取服务端程序 frps，然后由 systemd 切换到新版本目录。
-    install -d -m 0755 "$FRP_BASE_DIR"
-    install -d -m 0700 "$FRPS_DIR"
-    if [[ ! -x "$FRPS_BIN" ]]; then
-        curl --fail --silent --show-error --location --retry 3 --connect-timeout 15 \
-            --max-time 240 --output "$TMP/frp.tar.gz" "$FRP_DOWNLOAD_URL" \
-            || die "下载 frp 安装包失败：$FRP_DOWNLOAD_URL"
-        printf '%s  %s\n' "$FRP_DIGEST" "$TMP/frp.tar.gz" | sha256sum --check --status \
-            || die 'frp 安装包的 SHA-256 校验失败。'
-        tar -xOzf "$TMP/frp.tar.gz" -- "$FRP_FOLDER/frps" > "$TMP/frps"
-        install -m 0755 "$TMP/frps" "$FRPS_BIN"
-        changed=1
+    render_frps_config > "$TMP/frps-minimal.toml"
+    printf '%s\n' 'bindPort = 7000' > "$TMP/frps-sample.toml"
+    if uses_direct_listeners; then
+        render_frps_config loopback > "$TMP/frps.toml"
+    else
+        cp -- "$TMP/frps-minimal.toml" "$TMP/frps.toml"
     fi
 
-    # 先校验生成的配置，再写入正式路径。配置文件仅允许 root 读取和修改。
-    render_frps_config > "$TMP/frps.toml"
-    "$FRPS_BIN" verify -c "$TMP/frps.toml"
-
-    # 按用户提供的 systemd 参数运行 FRPS，并设置开机自启动和异常自动重启。
     cat > "$TMP/frps.service" <<EOF
 $MARKER
 [Unit]
@@ -301,28 +298,74 @@ RestartSec=5
 [Install]
 WantedBy=multi-user.target
 EOF
-    if ! cmp -s "$TMP/frps.toml" "$FRPS_CONFIG"; then
-        write_managed "$TMP/frps.toml" "$FRPS_CONFIG" 0600
-        changed=1
+    tail -n +2 "$TMP/frps.service" > "$TMP/frps-manual.service"
+    assert_known_frps_file "$FRPS_CONFIG" "$TMP/frps-minimal.toml" "$TMP/frps-sample.toml"
+    assert_known_frps_file "$unit" "$TMP/frps-manual.service"
+
+    if [[ -f "$old_unit" && "$(head -n 1 "$old_unit")" == "$MARKER" ]]; then
+        if systemctl is-active --quiet "$OLD_FRPS_UNIT"; then old_active=1; migrate=1; fi
+        if systemctl is-enabled --quiet "$OLD_FRPS_UNIT"; then migrate=1; fi
     fi
-    if ! cmp -s "$TMP/frps.service" "/etc/systemd/system/$FRPS_UNIT"; then
-        write_managed "$TMP/frps.service" "/etc/systemd/system/$FRPS_UNIT" 0644
-        systemctl daemon-reload
-        changed=1
+    if (( ! old_active )) && ! systemctl is-active --quiet "$FRPS_UNIT"; then
+        for listen_port in "$CONTROL_PORT" "$VHOST_HTTP_PORT"; do
+            [[ -z "$(ss -H -ltn "sport = :$listen_port")" ]] ||
+                die "TCP $listen_port is already listening. Inspect with ss -ltnp."
+        done
     fi
-    systemctl enable "$FRPS_UNIT"
-    if (( changed )); then systemctl restart "$FRPS_UNIT"; else systemctl start "$FRPS_UNIT"; fi
-    # 等待服务进入运行状态，并确认两个本地 TCP 端口都能接受连接。
-    local attempt
-    for attempt in {1..10}; do
-        if systemctl is-active --quiet "$FRPS_UNIT" &&
-            ( : > "/dev/tcp/127.0.0.1/$CONTROL_PORT" ) 2>/dev/null &&
-            ( : > "/dev/tcp/127.0.0.1/$VHOST_HTTP_PORT" ) 2>/dev/null; then
-            return 0
+
+    # 优先复用已安装的同版本程序或 root 目录下已经下载并通过校验的安装包。
+    if [[ ! -x "$FRPS_BIN" || "$("$FRPS_BIN" -v)" != "$FRP_VERSION" ]]; then
+        if [[ -f "$cached" ]] &&
+            printf '%s  %s\n' "$FRP_DIGEST" "$cached" | sha256sum --check --status; then
+            archive=$cached
+        else
+            curl --fail --silent --show-error --location --retry 3 --connect-timeout 15 \
+                --max-time 240 --output "$archive" "$FRP_DOWNLOAD_URL" \
+                || die "下载 frp 安装包失败：$FRP_DOWNLOAD_URL"
+            printf '%s  %s\n' "$FRP_DIGEST" "$archive" | sha256sum --check --status \
+                || die 'frp 安装包的 SHA-256 校验失败。'
         fi
-        sleep 1
-    done
-    die "FRPS 未能正常监听控制端口 $CONTROL_PORT 或 HTTP 虚拟主机端口 $VHOST_HTTP_PORT。请执行：journalctl -u $FRPS_UNIT -n 50"
+        tar -xzf "$archive" -C "$TMP"
+        source_bin="$TMP/$FRP_FOLDER/frps"
+    fi
+    "$source_bin" verify -c "$TMP/frps.toml"
+
+    if [[ "$source_bin" != "$FRPS_BIN" ]]; then
+        if [[ ! -d "$FRPS_DIR" ]]; then
+            install -d -m 0700 "$FRPS_DIR"
+            install -m 0755 "$TMP/$FRP_FOLDER/frpc" "$FRPS_DIR/frpc"
+            install -m 0644 "$TMP/$FRP_FOLDER/LICENSE" "$TMP/$FRP_FOLDER/frpc.toml" "$FRPS_DIR/"
+        fi
+        write_atomic "$source_bin" "$FRPS_BIN" 0755
+        changed=1
+    fi
+    if ! matches_frps_file "$FRPS_CONFIG" "$TMP/frps.toml"; then
+        if [[ -f "$FRPS_CONFIG" ]]; then cp -p -- "$FRPS_CONFIG" "$TMP/previous-frps.toml"; fi
+        write_atomic "$TMP/frps.toml" "$FRPS_CONFIG" 0600
+        changed=1
+        config_changed=1
+    fi
+    if ! matches_frps_file "$unit" "$TMP/frps.service" &&
+       ! matches_frps_file "$unit" "$TMP/frps-manual.service"; then
+        write_atomic "$TMP/frps.service" "$unit" 0644
+        changed=1
+    fi
+
+    systemctl daemon-reload
+    if (( old_active )); then systemctl stop "$OLD_FRPS_UNIT"; fi
+    if (( changed )) && systemctl is-active --quiet "$FRPS_UNIT"; then action=restart; fi
+    if systemctl "$action" "$FRPS_UNIT" && wait_for_frps; then
+        systemctl enable "$FRPS_UNIT"
+        if (( migrate )); then systemctl disable "$OLD_FRPS_UNIT"; fi
+        return 0
+    fi
+
+    systemctl stop "$FRPS_UNIT" || true
+    if (( config_changed )) && [[ -f "$TMP/previous-frps.toml" ]]; then
+        write_atomic "$TMP/previous-frps.toml" "$FRPS_CONFIG" 0600
+    fi
+    if (( old_active )); then systemctl start "$OLD_FRPS_UNIT" || true; fi
+    die "FRPS 未能正常监听 $CONTROL_PORT 和 $VHOST_HTTP_PORT。请执行：journalctl -u $FRPS_UNIT -n 50"
 }
 
 configure_direct_tcp() {
@@ -712,23 +755,23 @@ main() {
     log 'Installing system packages'
     export DEBIAN_FRONTEND=noninteractive
     apt-get update
-    apt-get install -y ca-certificates curl jq openssl ufw dnsutils iproute2 nginx certbot python3-certbot-nginx
+    apt-get install -y ca-certificates curl openssl ufw dnsutils iproute2 nginx certbot python3-certbot-nginx
 
-    resolve_frp_release "$architecture"
+    configure_frps_paths "$architecture"
 
-    log 'Checking DNS records and enabling firewall rules'
-    check_dns
+    log 'Enabling firewall rules'
     configure_firewall
 
     log 'Installing and starting frps'
     install_frps
 
     log 'Configuring Nginx and obtaining the Let'\''s Encrypt certificate'
+    check_dns
     configure_https
 
     configure_direct_tcp
     log "FRP control: $PUBLIC_IP:$CONTROL_PORT"
-    log "FRP HTTP vhost (loopback): 127.0.0.1:$VHOST_HTTP_PORT"
+    log "FRP HTTP vhost: TCP $VHOST_HTTP_PORT"
     log "FRPS config: $FRPS_CONFIG"
     log 'Start frpc with your existing frpc.ini.'
     log "VPS checks: systemctl status $FRPS_UNIT nginx certbot.timer; ufw status"
