@@ -1,16 +1,22 @@
 #!/usr/bin/env bash
+# 在 Ubuntu VPS 上部署 FRPS，并通过 Nginx 提供 HTTPS 反向代理。
+# 任一关键命令失败时停止，临时文件和证书探测文件由退出钩子清理。
 set -Eeuo pipefail
 export LC_ALL=C
 umask 077
 
 DOMAIN=xyzrpy.com
-PUBLIC_IP=167.179.99.196
+PUBLIC_IP=45.32.181.43
 CONTROL_PORT=7007
 VHOST_HTTP_PORT=8087
-FRP_VERSION=0.72.0
 FRPS_UNIT=xyzrpy-frps.service
-# FRPS 安装目录：amd64 对应 /root/frp_ws/frp_0.72.0_linux_amd64
+# GitHub 的 latest 接口返回正式发行版及其附件的下载地址和摘要。
+FRP_RELEASE_API=https://api.github.com/repos/fatedier/frp/releases/latest
+# 安装目录按版本和架构区分。查询发布信息后再确定具体路径。
 FRP_BASE_DIR=/root/frp_ws
+FRP_FOLDER=
+FRP_DOWNLOAD_URL=
+FRP_DIGEST=
 FRPS_DIR=
 FRPS_BIN=
 FRPS_CONFIG=
@@ -18,7 +24,9 @@ SITE=/etc/nginx/conf.d/xyzrpy-frp.conf
 WEBROOT=/var/www/xyzrpy-frp-acme
 CERT_NAME=xyzrpy-frp
 CERT_DIR="/etc/letsencrypt/live/$CERT_NAME"
+# 用管理标记识别本脚本生成的配置，避免覆盖手工维护的站点或服务。
 MARKER='# Managed by deploy-xyzrpy-frp.sh'
+# PORTS 是客户端可申请的代理端口。UPSTREAM 指定各域名对应的本地代理端口。
 PORTS=(2222 1090 1726 1095 1625 1995 8081 30 881 811 812 8091 1418 18789 8000 2726 4173)
 HOSTS=(xyzrpy.com www.xyzrpy.com pan.xyzrpy.com note.xyzrpy.com book.xyzrpy.com
        netron.xyzrpy.com img.xyzrpy.com docs.xyzrpy.com codediff.xyzrpy.com)
@@ -46,7 +54,7 @@ Ubuntu 22.04+ with systemd, amd64 or arm64.
   --direct-tcp PORT[,PORT...]
                           Also expose the selected FRP TCP ports on VPS IPv4.
                           Openings persist across runs. Default is no new openings.
-  --direct-bind-ip IP     Local VPS interface IPv4 for direct TCP (default 167.179.99.196).
+  --direct-bind-ip IP     Local VPS interface IPv4 for direct TCP (default 45.32.181.43).
   --help                  Show this help.
 
 Default HTTPS routes (xyzrpy.com): @ and www -> 8091, pan -> 8081,
@@ -122,6 +130,7 @@ assert_managed() {
     fi
 }
 
+# 在目标文件所在目录写入临时文件，再原子替换脚本管理的配置。
 write_managed() {
     local source=$1 path=$2 mode=$3 temporary
     assert_managed "$path"
@@ -132,6 +141,7 @@ write_managed() {
 
 check_dns() {
     local host a_records aaaa_records failed=0
+    # 在申请证书前逐个检查域名的 A 记录。存在 AAAA 记录时提示检查 IPv6 连通性。
     for host in "${HOSTS[@]}"; do
         a_records=$(dig +time=4 +tries=2 +short A "$host." |
             awk '/^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/' | sort -u) \
@@ -153,6 +163,7 @@ check_dns() {
 
 configure_firewall() {
     local port connection_port
+    # 合并显式指定的 SSH 端口、当前会话端口和本机 SSH 监听端口。
     if [[ -n "${SSH_CONNECTION:-}" ]]; then
         read -r _ _ _ connection_port <<< "$SSH_CONNECTION"
         if valid_port "${connection_port:-}"; then SSH_PORTS[$connection_port]=1; fi
@@ -177,7 +188,7 @@ configure_firewall() {
 
 render_frps_config() {
     local port
-    # FRP 0.72.0 使用 TOML 配置格式，不使用旧版 [common] INI 写法。
+    # 服务端配置使用 TOML。allowPorts 列出客户端可申请的 TCP 代理端口。
     printf '%s\n' \
         "$MARKER" \
         '# FRPC 连接 FRPS 使用的服务端监听地址和端口' \
@@ -198,8 +209,42 @@ render_frps_config() {
         'transport.tls.force = false'
 }
 
+# 根据 Ubuntu 的包架构和 GitHub 的正式发行版信息确定安装包。
+resolve_frp_release() {
+    local architecture=$1
+    local release_json="$TMP/frp-release.json" tag asset_name asset_info
+
+    curl --fail --silent --show-error --location --retry 3 --connect-timeout 15 \
+        --max-time 60 --header 'Accept: application/vnd.github+json' \
+        --output "$release_json" "$FRP_RELEASE_API" \
+        || die '无法查询 GitHub 上的 frp 最新正式版。'
+
+    # 限制版本标签的格式，确保由它生成的文件名和安装路径合法。
+    tag=$(jq -er '.tag_name | strings | select(test("^v[0-9]+[.][0-9]+[.][0-9]+$"))' "$release_json") \
+        || die 'GitHub 返回的 frp 版本标签无效。'
+    FRP_FOLDER="frp_${tag#v}_linux_${architecture}"
+    asset_name="$FRP_FOLDER.tar.gz"
+
+    # 精确匹配官方附件，读取实际下载地址与 SHA-256 摘要。
+    asset_info=$(jq -er --arg name "$asset_name" '
+        .assets[]
+        | select(.name == $name and .state == "uploaded")
+        | [.browser_download_url, .digest] | @tsv
+    ' "$release_json") || die "最新正式版 $tag 未提供 $asset_name。"
+    IFS=$'\t' read -r FRP_DOWNLOAD_URL FRP_DIGEST <<< "$asset_info"
+    [[ "$FRP_DOWNLOAD_URL" == "https://github.com/fatedier/frp/releases/download/$tag/$asset_name" ]] \
+        || die "附件 $asset_name 的下载地址无效。"
+    [[ "$FRP_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] \
+        || die "附件 $asset_name 缺少有效的 SHA-256 摘要。"
+    FRP_DIGEST=${FRP_DIGEST#sha256:}
+
+    FRPS_DIR="$FRP_BASE_DIR/$FRP_FOLDER"
+    FRPS_BIN="$FRPS_DIR/frps"
+    FRPS_CONFIG="$FRPS_DIR/frps.toml"
+    log "已选定 frp $tag（Linux $architecture），安装目录为 $FRPS_DIR"
+}
+
 install_frps() {
-    local digest=$2 folder="frp_${FRP_VERSION}_linux_$1"
     local changed=0
     assert_managed "$FRPS_CONFIG"
     assert_managed "/etc/systemd/system/$FRPS_UNIT"
@@ -211,21 +256,22 @@ install_frps() {
         fi
     done
 
+    # 同一版本已经安装时复用 frps。发现新版本时下载到临时目录，
+    # 核对摘要后只提取服务端程序 frps，然后由 systemd 切换到新版本目录。
+    install -d -m 0755 "$FRP_BASE_DIR"
+    install -d -m 0700 "$FRPS_DIR"
     if [[ ! -x "$FRPS_BIN" ]]; then
         curl --fail --silent --show-error --location --retry 3 --connect-timeout 15 \
-            --max-time 240 --output "$TMP/frp.tar.gz" \
-            "https://github.com/fatedier/frp/releases/download/v$FRP_VERSION/$folder.tar.gz"
-        printf '%s  %s\n' "$digest" "$TMP/frp.tar.gz" | sha256sum --check --status \
-            || die "FRP archive checksum mismatch."
-        tar -xzf "$TMP/frp.tar.gz" -C "$TMP" "$folder/frps"
-        install -d -m 0755 "${FRPS_BIN%/*}"
-        install -m 0755 "$TMP/$folder/frps" "$FRPS_BIN"
+            --max-time 240 --output "$TMP/frp.tar.gz" "$FRP_DOWNLOAD_URL" \
+            || die "下载 frp 安装包失败：$FRP_DOWNLOAD_URL"
+        printf '%s  %s\n' "$FRP_DIGEST" "$TMP/frp.tar.gz" | sha256sum --check --status \
+            || die 'frp 安装包的 SHA-256 校验失败。'
+        tar -xOzf "$TMP/frp.tar.gz" -- "$FRP_FOLDER/frps" > "$TMP/frps"
+        install -m 0755 "$TMP/frps" "$FRPS_BIN"
         changed=1
     fi
 
-    # 创建 FRPS 版本目录，配置文件仅允许 root 读取和修改。
-    install -d -m 0755 "$FRP_BASE_DIR"
-    install -d -m 0700 "$FRPS_DIR"
+    # 先校验生成的配置，再写入正式路径。配置文件仅允许 root 读取和修改。
     render_frps_config > "$TMP/frps.toml"
     "$FRPS_BIN" verify -c "$TMP/frps.toml"
 
@@ -259,6 +305,7 @@ EOF
     fi
     systemctl enable "$FRPS_UNIT"
     if (( changed )); then systemctl restart "$FRPS_UNIT"; else systemctl start "$FRPS_UNIT"; fi
+    # 等待服务进入运行状态，并确认两个本地 TCP 端口都能接受连接。
     local attempt
     for attempt in {1..10}; do
         if systemctl is-active --quiet "$FRPS_UNIT" &&
@@ -273,6 +320,7 @@ EOF
 
 configure_direct_tcp() {
     local port base proxyd=/lib/systemd/systemd-socket-proxyd
+    # 仅为显式选定的端口创建公网监听，将连接转发到本机 FRP 代理。
     (( ${#DIRECT_PORTS[@]} )) || return 0
     [[ -x "$proxyd" ]] || proxyd=/usr/lib/systemd/systemd-socket-proxyd
     [[ -x "$proxyd" ]] || die 'systemd-socket-proxyd was not found.'
@@ -336,6 +384,7 @@ EOF
 
 render_site() {
     local mode=$1 host port scheme ipv6_http= ipv6_tls=
+    # 始终保留 HTTP 证书验证路径。证书就绪后再启用 HTTPS 和跳转。
     if [[ -r /proc/net/if_inet6 ]] && read -r _ < /proc/net/if_inet6; then
         ipv6_http='    listen [::]:80;'
         ipv6_tls='    listen [::]:443 ssl;'
@@ -421,6 +470,7 @@ probe_hosts() {
 
 apply_site() {
     local file=$1 mode=$2 previous="$TMP/previous.conf" had_previous=0 activated=0
+    # 保存当前站点。检查 Nginx 配置并逐个探测域名，失败时恢复此前的站点文件。
     assert_managed "$SITE"
     if [[ -e "$SITE" ]]; then cp -p -- "$SITE" "$previous"; had_previous=1; fi
     write_managed "$file" "$SITE" 0644
@@ -495,6 +545,7 @@ EOF
 }
 
 cleanup() {
+    # 探测文件位于证书验证目录，其他临时文件统一放在本次部署的工作目录。
     rm -f -- "$WEBROOT/.well-known/acme-challenge/$PROBE_NAME"
     rm -rf -- "$TMP"
 }
@@ -505,17 +556,15 @@ main() {
     . /etc/os-release
     [[ "${ID:-}" == ubuntu && "${VERSION_ID%%.*}" -ge 22 && -d /run/systemd/system ]] \
         || die "This script requires Ubuntu 22.04 or later, with systemd running."
-    local architecture digest
+    local architecture
+    # 脚本依赖 Ubuntu 的 apt、UFW 和 systemd，这里保留原有的平台范围。
     case "$(dpkg --print-architecture)" in
-        amd64) architecture=amd64; digest=daf719b32ca2778770bb92955e231a07414d754378b9af328aa2642862479804 ;;
-        arm64) architecture=arm64; digest=02180b857480302fd934e9ddbd50fe2f73229f99062f88756abc6de9df5e95cf ;;
+        amd64) architecture=amd64 ;;
+        arm64) architecture=arm64 ;;
         *) die "Supported architectures are amd64 and arm64." ;;
     esac
-    # amd64 主机将使用用户指定的精确目录：/root/frp_ws/frp_0.72.0_linux_amd64。
-    FRPS_DIR="$FRP_BASE_DIR/frp_${FRP_VERSION}_linux_${architecture}"
-    FRPS_BIN="$FRPS_DIR/frps"
-    FRPS_CONFIG="$FRPS_DIR/frps.toml"
 
+    # 防止两个部署进程同时修改服务、站点配置和防火墙。
     exec 9>/run/lock/xyzrpy-frp-deploy.lock
     flock -n 9 || die "Another deployment is running."
     TMP=$(mktemp -d /tmp/xyzrpy-frp.XXXXXX)
@@ -528,14 +577,16 @@ main() {
     log 'Installing Ubuntu packages'
     export DEBIAN_FRONTEND=noninteractive
     apt-get update
-    apt-get install -y ca-certificates curl openssl ufw dnsutils iproute2 nginx certbot
+    apt-get install -y ca-certificates curl jq openssl ufw dnsutils iproute2 nginx certbot
+
+    resolve_frp_release "$architecture"
 
     log 'Checking DNS records and enabling firewall rules'
     check_dns
     configure_firewall
 
     log 'Installing and starting frps'
-    install_frps "$architecture" "$digest"
+    install_frps
 
     log 'Configuring Nginx and obtaining the Let'\''s Encrypt certificate'
     configure_https
