@@ -64,9 +64,8 @@
 
 ## 5. 最近一次完整运行记录
 
-- Python unittest：39 项测试全部通过（`Ran 39 tests ... OK`）。
-- Bash 全部脚本语法：PASS。
-- Python `compileall`：PASS。
-- systemd unit：`systemd-analyze verify` 对部署路径做可执行文件替身后 PASS；不代表服务运行测试。
-- 原始上传脚本副本 SHA256：PASS。
+- 核心管理层此前完整运行记录：39 项 unittest 全部通过（`Ran 39 tests ... OK`）。
+- 本次切换上游来源后重新执行：所有 `.sh` 的 `bash -n` PASS；Python `compileall` PASS；核心安装器、打包器、脚本和 Shell 测试 PASS；systemd unit 静态校验 PASS。
+- 本次重新运行完整 `tests/run.sh` 时，当前执行容器在配置测试阶段发生长时间 subprocess 等待并被工具超时终止；因此本次完整套件状态记为 INCOMPLETE，不重复宣称本轮 39 项全量通过。
 - ShellCheck：NOT TESTED（构建环境未安装）。
+- 上游 `git fetch` / commit pin：BLOCKED（当前容器无法解析 github.com）。

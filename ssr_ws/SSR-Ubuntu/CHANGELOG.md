@@ -25,3 +25,12 @@
 - 加固卸载路径检查、迁移备份目录唯一性。
 - 增加 Python 3.8 语法 AST 测试、打包完整性测试、脚本测试、GitHub Actions 工作流和交付报告。
 - 本次交付仍不含 manyuser 核心源码包；固定核心和真实 Ubuntu/客户端测试保持 BLOCKED/NOT TESTED。
+
+## 0.1.2-user-selected-upstream
+
+- 根据用户提供的 `https://github.com/ssrlive/shadowsocksr/tree/manyuser` 更新核心候选来源。
+- 新增 `install/inspect-core-source.sh`，用于解析分支 HEAD、commit SHA、tree SHA 并核查核心关键文件。
+- `install/prepare-core-archive.sh` 改为从 ssrlive manyuser 分支历史生成固定 commit 归档和 SHA256。
+- 更新核心状态、README、NOTICE、systemd 文档来源链接和上游审查报告。
+- 仍未从当前构建环境获取 Git commit/tree/archive SHA256；核心部署继续 fail-closed。
+- 新来源与 Toyo 备份仓库尚未完成逐文件 diff；真实 Ubuntu 和 SSR 客户端回归仍为 NOT TESTED。

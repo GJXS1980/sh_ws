@@ -3,7 +3,7 @@
 # This script fetches source only; it never executes upstream code.
 set -Eeuo pipefail
 
-REPO_URL='https://github.com/ToyoDAdoubiBackup/shadowsocksr.git'
+REPO_URL='https://github.com/ssrlive/shadowsocksr.git'
 OUT_DIR=${1:-/root/ssr-core-source}
 COMMIT=${2:-}
 
@@ -26,6 +26,9 @@ git -C "$WORK" remote add origin "$REPO_URL"
 # proven reachable from the repository's manyuser branch.
 git -C "$WORK" fetch origin refs/heads/manyuser:refs/remotes/origin/manyuser
 git -C "$WORK" cat-file -e "$COMMIT^{commit}"
+for path in shadowsocks/server.py shadowsocks/daemon.py shadowsocks/shell.py shadowsocks/encrypt.py shadowsocks/obfs.py setup.py CHANGES; do
+    git -C "$WORK" cat-file -e "$COMMIT:$path" || { echo "指定提交缺少核心文件：$path" >&2; exit 4; }
+done
 git -C "$WORK" merge-base --is-ancestor "$COMMIT" refs/remotes/origin/manyuser || {
     echo '指定 commit 不属于当前 manyuser 分支历史；拒绝归档。' >&2
     exit 3
@@ -34,7 +37,9 @@ FETCHED=$(git -C "$WORK" rev-parse "$COMMIT^{commit}")
 [[ "${FETCHED,,}" == "${COMMIT,,}" ]] || { echo '解析出的 commit 与请求不一致。' >&2; exit 3; }
 
 ARCHIVE="$OUT_DIR/shadowsocksr-${COMMIT}.tar.gz"
-git -C "$WORK" archive --format=tar.gz --prefix="shadowsocksr-${COMMIT}/" -o "$ARCHIVE" "$COMMIT"
+git -C "$WORK" archive --format=tar --prefix="shadowsocksr-${COMMIT}/" "$COMMIT" | gzip -n > "$ARCHIVE"
 SHA=$(sha256sum "$ARCHIVE" | awk '{print $1}')
-printf '核心仓库：%s\n固定提交：%s\n压缩包：%s\nSHA256：%s\n' "$REPO_URL" "$FETCHED" "$ARCHIVE" "$SHA"
+TREE=$(git -C "$WORK" rev-parse "$COMMIT^{tree}")
+DATE=$(git -C "$WORK" show -s --format=%cI "$COMMIT")
+printf '核心仓库：%s\n固定提交：%s\n源码树：%s\n提交日期：%s\n压缩包：%s\nSHA256：%s\n' "$REPO_URL" "$FETCHED" "$TREE" "$DATE" "$ARCHIVE" "$SHA"
 printf '\n下一步：将上述 commit 与 SHA256 保存到受控发布记录；然后按 README 的 SSR_CORE_* 环境变量运行安装器。\n'

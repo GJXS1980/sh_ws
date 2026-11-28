@@ -129,7 +129,8 @@ def main():
         patch_file = pathlib.Path(__file__).resolve().parents[1] / "patches" / "redact-server-password.patch"
         patch_hash = hashlib.sha256(patch_file.read_bytes()).hexdigest() if patch_file.is_file() else "unavailable"
         metadata = {
-            "repository": "https://github.com/ToyoDAdoubiBackup/shadowsocksr",
+            "repository": "https://github.com/ssrlive/shadowsocksr",
+            "branch_readme_clone_url": "https://github.com/ShadowsocksR-Live/shadowsocksr.git",
             "branch_at_source": "manyuser",
             "commit": args.commit.lower(),
             "archive_sha256": digest,

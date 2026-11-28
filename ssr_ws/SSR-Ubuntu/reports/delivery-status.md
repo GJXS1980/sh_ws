@@ -16,7 +16,7 @@
 
 ## 明确未完成/不可宣称通过
 
-1. 本交付不含 SSR manyuser 核心源码压缩包。当前执行环境无法连接 GitHub 获取一个固定 commit 并独立核验归档 SHA256。
+1. 本交付不含 SSR manyuser 核心源码压缩包。核心候选来源已按用户指定更新为 `https://github.com/ssrlive/shadowsocksr/tree/manyuser`，但当前执行环境无法连接 GitHub Git transport 获取固定 commit/tree SHA 并独立核验归档 SHA256。
 2. 因缺少核心包，真实核心 Python/OpenSSL/libsodium 运行测试未完成。
 3. 未在 Ubuntu 20.04、22.04、24.04、26.04 VM 完成安装测试。
 4. 未在 ARM64 环境完成部署测试。
@@ -35,4 +35,4 @@
 - ZIP CRC 检查：PASS。
 - 必需交付文件检查：PASS。
 - Python 缓存文件排除检查：PASS。
-- 注意：本 ZIP 是管理工具项目源码包；并未包含上游 SSR manyuser 核心归档。核心归档因无法从当前构建环境取得并独立验证固定 commit 与 SHA256，继续保持 BLOCKED。不得将此包描述为已完成 SSR 客户端端到端验收的生产安装包。
+- 注意：本 ZIP 是管理工具项目源码包；并未包含上游 SSR manyuser 核心归档。核心候选来源已改为用户指定的 ssrlive 仓库，并新增源码检查脚本；但核心归档因无法从当前构建环境取得并独立验证固定 commit/tree 与 SHA256，继续保持 BLOCKED。不得将此包描述为已完成 SSR 客户端端到端验收的生产安装包。

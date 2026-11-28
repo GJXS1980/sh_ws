@@ -6,9 +6,9 @@
 
 ## ShadowsocksR manyuser core
 
-The SSR core is **not bundled** in this source package. The intended upstream repository is <https://github.com/ToyoDAdoubiBackup/shadowsocksr>, branch name `manyuser`. The upstream repository identifies Apache-2.0 licensing. Upstream notices and license files must be retained when the core is separately obtained.
+The SSR core is **not bundled** in this source package. The user-specified candidate source is <https://github.com/ssrlive/shadowsocksr/tree/manyuser>; its README also names <https://github.com/ShadowsocksR-Live/shadowsocksr.git> as the clone URL. The visible source identifies Apache-2.0 licensing; retain upstream LICENSE and copyright notices when redistributing the core.
 
-The core installer accepts only a caller-supplied archive whose commit identifier, top-level directory, package version, and SHA256 meet its checks. The archive SHA256 must be independently recorded by the operator. This project does not claim to have verified a live upstream commit in the build environment.
+The core installer accepts only a caller-supplied archive whose commit identifier, top-level directory, package version, and SHA256 meet its checks. The archive SHA256 must be independently recorded by the operator. The exact commit and archive hash are still unverified because this build environment cannot resolve GitHub Git transport. The new source candidate has not yet been diffed byte-for-byte against the historical Toyo backup repository or tested with the original client.
 
 ## New manager code
 

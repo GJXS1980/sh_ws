@@ -1,6 +1,6 @@
 [Unit]
 Description=ShadowsocksR manyuser server (SSR-Ubuntu manager)
-Documentation=https://github.com/ToyoDAdoubiBackup/shadowsocksr
+Documentation=https://github.com/ssrlive/shadowsocksr/tree/manyuser
 After=network-online.target
 Wants=network-online.target
 
