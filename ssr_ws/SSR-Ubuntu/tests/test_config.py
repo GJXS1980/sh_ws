@@ -42,6 +42,7 @@ class ConfigTests(unittest.TestCase):
     def run_cli(self, *args, ok=True):
         env = os.environ.copy()
         env["SSR_SKIP_SYSTEMCTL"] = "1"
+        env["SSR_SKIP_FIREWALL"] = "1"
         p = subprocess.run([sys.executable, str(CONFIG), *args, "--file", str(self.path), "--no-restart"], env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         if ok and p.returncode != 0:
             self.fail("command failed: %s\n%s\n%s" % (args, p.stdout, p.stderr))
@@ -230,14 +231,120 @@ class ConfigTests(unittest.TestCase):
         bindir.mkdir()
         state = pathlib.Path(self.tmp.name) / "restart-state"
         fake = bindir / "systemctl"
-        fake.write_text("#!/usr/bin/env python3\nimport pathlib,sys\nstate=pathlib.Path(%r)\ncmd=sys.argv[1] if len(sys.argv)>1 else ''\nif cmd=='cat': sys.exit(0)\nif cmd=='restart':\n    if not state.exists(): state.write_text('failed-once'); sys.exit(1)\n    sys.exit(0)\nif cmd=='is-active': sys.exit(0 if state.exists() else 1)\nsys.exit(0)\n" % str(state), encoding="utf-8")
+        fake.write_text(
+            "#!/bin/sh\n"
+            "cmd=$1\n"
+            "case \"$cmd\" in\n"
+            "  cat) exit 0 ;;\n"
+            "  restart) if [ ! -f \"$FAKE_STATE\" ]; then touch \"$FAKE_STATE\"; exit 1; fi; exit 0 ;;\n"
+            "  is-active) [ -f \"$FAKE_STATE\" ] && exit 0 || exit 1 ;;\n"
+            "esac\n"
+            "exit 0\n",
+            encoding="utf-8",
+        )
         fake.chmod(0o755)
         env = os.environ.copy()
         env["PATH"] = str(bindir) + os.pathsep + env.get("PATH", "")
+        env["FAKE_STATE"] = str(state)
         env.pop("SSR_SKIP_SYSTEMCTL", None)
         p = subprocess.run([sys.executable, str(CONFIG), "set", "password", json.dumps("new-secret"), "--file", str(self.path)], env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         self.assertNotEqual(p.returncode, 0)
         self.assertEqual(self.path.read_bytes(), before)
+
+
+    def _run_add_with_firewall_helper(self, helper, extra_env=None, no_restart=True):
+        env = os.environ.copy()
+        env.pop("SSR_SKIP_FIREWALL", None)
+        env["SSR_FIREWALL_HELPER"] = str(helper)
+        env["SSR_SKIP_SYSTEMCTL"] = "1" if no_restart else "0"
+        if extra_env:
+            env.update(extra_env)
+        args = [sys.executable, str(CONFIG), "add-user", "2444", "new-secret", "--file", str(self.path)]
+        if no_restart:
+            args.append("--no-restart")
+        return subprocess.run(args, env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+    def test_add_user_calls_firewall_and_reports_result(self):
+        self.run_cli("mode", "multi")
+        helper = pathlib.Path(self.tmp.name) / "firewall-helper.sh"
+        log = pathlib.Path(self.tmp.name) / "firewall.log"
+        helper.write_text(
+            "#!/bin/sh\n"
+            "printf '%s\\n' \"$*\" >> \"%s\"\n"
+            "case \"$1\" in allow) echo 'mock firewall allowed tcp and udp'; exit 0;; remove) exit 0;; *) exit 2;; esac\n"
+            % ("%s", str(log)),
+            encoding="utf-8",
+        )
+        helper.chmod(0o755)
+        p = self._run_add_with_firewall_helper(helper)
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        self.assertIn("TCP/UDP 已自动放行", p.stdout)
+        self.assertIn("SSR 服务状态：未执行重启", p.stdout)
+        self.assertEqual(log.read_text().strip(), "allow 2444")
+        self.assertEqual(self.load()["port_password"]["2444"], "new-secret")
+
+    def test_add_user_aborts_when_active_firewall_allow_fails(self):
+        self.run_cli("mode", "multi")
+        helper = pathlib.Path(self.tmp.name) / "firewall-helper.sh"
+        helper.write_text("#!/bin/sh\necho 'mock firewall failure' >&2\nexit 2\n", encoding="utf-8")
+        helper.chmod(0o755)
+        before = self.load()
+        p = self._run_add_with_firewall_helper(helper)
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn("防火墙自动放行失败", p.stderr)
+        self.assertEqual(self.load(), before)
+
+    def test_add_user_continues_when_no_supported_firewall_is_active(self):
+        self.run_cli("mode", "multi")
+        helper = pathlib.Path(self.tmp.name) / "firewall-helper.sh"
+        helper.write_text("#!/bin/sh\necho 'no active firewall'\nexit 3\n", encoding="utf-8")
+        helper.chmod(0o755)
+        p = self._run_add_with_firewall_helper(helper)
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        self.assertIn("未自动放行", p.stdout)
+        self.assertIn("手动检查 VPS 防火墙", p.stdout)
+        self.assertEqual(self.load()["port_password"]["2444"], "new-secret")
+
+    def test_restart_failure_rolls_back_new_firewall_rule(self):
+        self.run_cli("mode", "multi")
+        helper = pathlib.Path(self.tmp.name) / "firewall-helper.sh"
+        log = pathlib.Path(self.tmp.name) / "firewall.log"
+        helper.write_text(
+            "#!/bin/sh\n"
+            "printf '%s\\n' \"$*\" >> \"%s\"\n"
+            "exit 0\n" % ("%s", str(log)),
+            encoding="utf-8",
+        )
+        helper.chmod(0o755)
+        bindir = pathlib.Path(self.tmp.name) / "bin"
+        bindir.mkdir()
+        state = pathlib.Path(self.tmp.name) / "restart-state"
+        systemctl = bindir / "systemctl"
+        systemctl.write_text(
+            "#!/bin/sh\n"
+            "cmd=$1\n"
+            'case "$cmd" in\n'
+            "  cat) exit 0 ;;\n"
+            '  restart) if [ ! -f "$FAKE_STATE" ]; then touch "$FAKE_STATE"; exit 1; fi; exit 0 ;;\n'
+            '  is-active) [ -f "$FAKE_STATE" ] && exit 0 || exit 1 ;;\n'
+            "esac\n"
+            "exit 0\n",
+            encoding="utf-8",
+        )
+        systemctl.chmod(0o755)
+        env = os.environ.copy()
+        env.pop("SSR_SKIP_FIREWALL", None)
+        env.pop("SSR_SKIP_SYSTEMCTL", None)
+        env["SSR_FIREWALL_HELPER"] = str(helper)
+        env["FAKE_STATE"] = str(state)
+        env["PATH"] = str(bindir) + os.pathsep + env.get("PATH", "")
+        p = subprocess.run(
+            [sys.executable, str(CONFIG), "add-user", "2444", "new-secret", "--file", str(self.path)],
+            env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        )
+        self.assertNotEqual(p.returncode, 0)
+        self.assertNotIn("2444", self.load()["port_password"])
+        self.assertEqual(log.read_text().splitlines(), ["allow 2444", "remove 2444"])
 
 
 if __name__ == "__main__":

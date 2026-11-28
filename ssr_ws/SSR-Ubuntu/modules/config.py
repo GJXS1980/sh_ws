@@ -238,7 +238,45 @@ def _restart_service() -> None:
         raise ConfigError("SSR 重启或状态检查失败：%s" % detail)
 
 
-def transact(path: pathlib.Path, mutator, restart: bool = True, expected_sha256: Optional[str] = None) -> pathlib.Path:
+def _run_firewall(action: str, port: str):
+    """Run the installed firewall helper and return (exit_code, combined_output)."""
+    if os.environ.get("SSR_SKIP_FIREWALL") == "1":
+        return 3, "[测试] 已跳过防火墙操作"
+    helper = pathlib.Path(os.environ.get("SSR_FIREWALL_HELPER", str(pathlib.Path(__file__).with_name("firewall.sh"))))
+    if not helper.is_file():
+        return 2, "找不到防火墙管理脚本：%s" % helper
+    proc = subprocess.run(
+        ["bash", str(helper), action, str(port)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+    return proc.returncode, (proc.stdout or "").strip()
+
+
+def _service_status_text(restart_requested: bool) -> str:
+    if not restart_requested:
+        return "未执行重启（--no-restart）"
+    if os.environ.get("SSR_SKIP_SYSTEMCTL") == "1":
+        return "测试模式跳过 systemd 检查"
+    if shutil.which("systemctl") is None:
+        return "无法检查（systemctl 不存在）"
+    result = subprocess.run(
+        ["systemctl", "is-active", "--quiet", "ssr.service"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    return "运行正常（active）" if result.returncode == 0 else "未运行或状态异常"
+
+
+def transact(
+    path: pathlib.Path,
+    mutator,
+    restart: bool = True,
+    expected_sha256: Optional[str] = None,
+    before_commit=None,
+    rollback_hook=None,
+) -> pathlib.Path:
     if path.is_symlink():
         raise ConfigError("拒绝通过符号链接修改配置文件：%s" % path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -254,22 +292,44 @@ def transact(path: pathlib.Path, mutator, restart: bool = True, expected_sha256:
         if expected_sha256 and hashlib.sha256(old_bytes).hexdigest() != expected_sha256:
             raise ConfigError("配置文件在编辑期间已被其他操作修改；为避免覆盖新配置，本次手动编辑已取消")
         old_cfg = validate_config(json.loads(old_bytes.decode("utf-8")))
-        backup = _backup(path)
         new_cfg = copy.deepcopy(old_cfg)
         mutator(new_cfg)
         validate_config(new_cfg)
-        _write_atomic(path, new_cfg)
-        if restart:
-            try:
-                _restart_service()
-            except Exception:
-                _write_bytes_atomic(path, old_bytes, 0o640)
+        backup = _backup(path)
+        prepared = None
+        prepare_completed = False
+        try:
+            # For add-user, open the port before committing the account. If any
+            # subsequent write/restart step fails, rollback_hook removes only
+            # the firewall rules created by this operation.
+            if before_commit is not None:
+                prepared = before_commit(old_cfg, new_cfg)
+                prepare_completed = True
+            _write_atomic(path, new_cfg)
+            if restart:
                 try:
                     _restart_service()
-                except Exception as rollback_error:
-                    raise ConfigError("新配置启动失败，旧配置已恢复，但旧服务重启也失败：%s。备份：%s" % (rollback_error, backup))
-                raise
-        return backup
+                except Exception:
+                    _write_bytes_atomic(path, old_bytes, 0o640)
+                    try:
+                        _restart_service()
+                    except Exception as rollback_error:
+                        raise ConfigError(
+                            "新配置启动失败，旧配置已恢复，但旧服务重启也失败：%s。备份：%s"
+                            % (rollback_error, backup)
+                        )
+                    raise
+            return backup
+        except Exception:
+            if prepare_completed and rollback_hook is not None:
+                try:
+                    rollback_hook(prepared)
+                except Exception as firewall_rollback_error:
+                    raise ConfigError(
+                        "配置事务失败，且防火墙回滚失败：%s。请人工检查防火墙规则。备份：%s"
+                        % (firewall_rollback_error, backup)
+                    )
+            raise
 
 
 def _mode(cfg: Dict[str, Any]) -> str:
@@ -364,14 +424,55 @@ def cmd_add_user(args) -> None:
     password = sys.stdin.readline().rstrip("\n") if args.password_stdin else args.password
     if not password:
         raise ConfigError("密码不能为空")
+
+    firewall_state = {"status": "尚未检查", "output": ""}
+
     def mutate(c):
         if _mode(c) != "multi":
             raise ConfigError("当前是单端口模式，请先切换为多端口模式")
         if port in c["port_password"]:
             raise ConfigError("端口 %s 已存在" % port)
         c["port_password"][port] = password
-    backup = transact(pathlib.Path(args.file), mutate, not args.no_restart)
-    print("用户已添加。备份：%s" % backup)
+
+    def prepare_firewall(_old_cfg, _new_cfg):
+        rc, output = _run_firewall("allow", port)
+        firewall_state["output"] = output
+        if rc == 0:
+            firewall_state["status"] = "TCP/UDP 已自动放行"
+            return True
+        if rc == 3:
+            firewall_state["status"] = "未自动放行（没有可安全管理的已启用防火墙）"
+            return False
+        raise ConfigError(
+            "防火墙自动放行失败，用户配置未提交：%s"
+            % (output or "防火墙管理脚本返回错误")
+        )
+
+    def rollback_firewall(prepared):
+        if prepared is True:
+            rc, output = _run_firewall("remove", port)
+            if rc != 0:
+                raise ConfigError(output or "无法移除本次创建的防火墙规则")
+
+    restart_requested = not args.no_restart
+    backup = transact(
+        pathlib.Path(args.file),
+        mutate,
+        restart_requested,
+        before_commit=prepare_firewall,
+        rollback_hook=rollback_firewall,
+    )
+
+    print("[完成] SSR 用户已添加。")
+    print("用户端口：%s" % port)
+    print("防火墙状态：%s" % firewall_state["status"])
+    if firewall_state["output"]:
+        for line in firewall_state["output"].splitlines():
+            print("  " + line)
+    print("SSR 服务状态：%s" % _service_status_text(restart_requested))
+    print("配置备份：%s" % backup)
+    if firewall_state["status"].startswith("未自动放行"):
+        print("[注意] 请手动检查 VPS 防火墙及云平台安全组，确保 TCP/UDP %s 已放行。" % port)
 
 
 def cmd_delete_user(args) -> None:

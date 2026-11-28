@@ -1,6 +1,6 @@
-# SSR-Ubuntu 0.2.0 测试报告
+# SSR-Ubuntu 0.2.1 测试报告
 
-## 1. 用户提供的 Vultr 实机环境
+## 1. 用户提供的 Vultr 实机环境（既有记录）
 
 - OS：Ubuntu 22.04.5 LTS
 - CPU：x86_64 / amd64
@@ -8,7 +8,7 @@
 - OpenSSL：3.0.2
 - libsodium：`ldconfig -p` 可发现动态库
 
-## 2. 用户提供的实机测试结果
+## 2. 既有实机测试结果
 
 | 测试项 | 结果 |
 |---|---|
@@ -26,40 +26,54 @@
 | TCP 2333 监听 | PASS |
 | UDP 2333 监听 | PASS |
 
-以上实机结果来自用户在本次对话提供的终端输出。
+以上实机结果来自用户在此前对话提供的终端输出，不代表本次防火墙新增功能已在该 VPS 上实测。
 
-## 3. 本项目构建环境自动化测试
+## 3. 本次 0.2.1 自动化测试
 
-`bash tests/run.sh` 覆盖：
+`bash tests/run.sh`：**52 项 unittest 全部通过（52 PASS / 0 FAIL）**。
 
-- Bash 语法、Python 编译和 Python 3.8 AST 兼容检查；
-- 配置校验、锁、备份、原子写入、失败回滚、单/多端口 CRUD；
-- SSR/SS 链接编码和 manyuser 用户覆盖；
-- TCP endpoint 解析和地理位置缓存；
-- 固定归档契约、日志脱敏补丁、OpenSSL 3 补丁锚点/幂等性；
-- 菜单版本、安装入口、服务包装器和打包文件检查。
+新增防火墙模拟测试：
 
-## 4. 未测试/未通过项
+- Firewalld 自动识别。
+- Firewalld 运行时 TCP/UDP 放行。
+- Firewalld 永久 TCP/UDP 规则。
+- Firewalld 仅删除本工具创建的规则。
+- UFW TCP/UDP 放行。
+- 未启用防火墙时返回非致命状态。
+- 无效端口拒绝。
 
-- 当前打包容器无法访问 GitHub Git transport，因此不能在此重建上游归档；固定归档 SHA256 来自用户提供的服务器输出及项目锁定记录。
+新增账号流程测试：
+
+- 新增用户调用防火墙 helper 并输出结果。
+- 活跃防火墙放行失败时不提交账号。
+- 无受支持的活动防火墙时继续创建账号并提示人工放行。
+- SSR 重启失败时恢复旧配置并撤销本次新建防火墙规则。
+
+其他检查：
+
+- 所有 Shell 文件 `bash -n`：PASS。
+- Python 编译：PASS。
+- systemd unit 静态检查：由 `tests/run.sh` 执行。
+- ShellCheck：若构建机未安装则显示 NOT TESTED。
+
+## 4. 防火墙支持边界
+
+- UFW：仅在 `Status: active` 时自动添加 TCP/UDP 规则。
+- Firewalld：仅在 `firewall-cmd --state` 返回 `running` 时添加运行时及永久规则。
+- 项目专用 iptables 链：保留原有受限支持逻辑。
+- 同时检测到 UFW 和 Firewalld 时拒绝自动修改。
+- 原生 nftables：不向未知 base chain 自动插入规则；会提示人工处理。
+- 没有已启用的受支持防火墙时，不自动开启防火墙；账号可以创建，但需要人工检查 VPS 防火墙和云安全组。
+- 当前测试通过 Mock 模拟防火墙命令，未在真实 UFW/Firewalld 主机上执行规则变更。
+
+## 5. 未测试/未通过项
+
 - 原版 SSR 客户端真实连接、同链接对照和实际代理流量：NOT TESTED END-TO-END。
 - Ubuntu 20.04/24.04/26.04、ARM64：NOT TESTED。
-- ShellCheck：若构建机未安装则显示 NOT TESTED。
-- 不同防火墙组合、BBR 内核参数和公网安全组：需目标环境另行验收。
+- Vultr 云防火墙/安全组联动：NOT TESTED。
+- 不同真实防火墙发行版、zone、IPv6 策略组合：仍需目标环境验收。
+- 当前构建容器无法访问 GitHub Git transport，因此未重新下载上游核心归档。
 
-## 5. 验收说明
+## 6. 验收说明
 
-核心加密、插件、配置管理和 Ubuntu 22.04 systemd 双协议监听已有用户实机通过记录；这不能替代原版客户端端到端兼容验收。任何更新或生产迁移仍应先做备份并在测试环境验证。
-
-## 6. 本次 0.2.0 源码包验证记录
-
-在 Debian GNU/Linux 13 / Python 3.13.5 / x86_64 构建容器执行：
-
-- `bash tests/run.sh`：43 项 unittest 全部通过（43 PASS / 0 FAIL）。
-- 所有 Shell 文件语法检查：PASS。
-- Python compileall：PASS。
-- systemd unit 静态语法检查（部署路径使用测试桩）：PASS。
-- ShellCheck：NOT TESTED（未安装）。
-- 源码 ZIP CRC、MANIFEST SHA256、必需文件和缓存排除检查：PASS。
-
-本地构建容器没有 GitHub Git transport 网络，因此未在此处重新下载上游核心归档，也未重新执行真实 Ubuntu 安装。Ubuntu 22.04 实机结果见第 2 节。
+0.2.1 已完成源码级防火墙集成和 Mock 自动化测试。首次部署或升级到真实服务器后，应先确认现有防火墙类型和规则，再用一个测试端口验证 TCP/UDP 可达性。任何生产升级仍应先备份配置和防火墙规则。

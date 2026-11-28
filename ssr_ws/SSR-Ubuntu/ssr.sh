@@ -2,7 +2,7 @@
 # SSR-Ubuntu manager. The protocol core remains the original SSR manyuser core.
 set -Eeuo pipefail
 
-VERSION='0.2.0'
+VERSION='0.2.1'
 CONFIG_FILE=${SSR_CONFIG_FILE:-/etc/shadowsocksr/user-config.json}
 CORE_DIR=${SSR_CORE_DIR:-/usr/local/shadowsocksr}
 UNIT='ssr.service'

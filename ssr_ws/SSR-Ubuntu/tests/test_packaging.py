@@ -45,7 +45,7 @@ class PackagingTests(unittest.TestCase):
             "install/dependencies.sh", "install/core_install.py", "install/patch_core_crypto.py",
             "install/prepare-core-archive.sh", "modules/config.py",
             "modules/link.py", "modules/connection.py", "modules/firewall.sh",
-            "modules/bbr.sh", "modules/qr.sh", "modules/service.sh", "modules/log.sh",
+            "modules/bbr.sh", "modules/qr.sh", "modules/service.sh", "modules/log.sh", "tests/test_firewall.py",
             "service/ssr.service", "uninstall/uninstall.sh", "migration/detect.sh",
             "migration/backup.sh", "migration/migrate.sh", "migration/rollback.sh",
             "reports/source-audit.md", "reports/compatibility.md", "reports/test-report.md",
