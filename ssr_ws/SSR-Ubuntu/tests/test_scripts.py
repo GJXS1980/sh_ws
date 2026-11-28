@@ -24,6 +24,12 @@ class ScriptTests(unittest.TestCase):
             bad = subprocess.run(["bash", str(ROOT / "modules/service.sh"), "kill"], env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             self.assertEqual(bad.returncode, 2)
 
+
+    def test_manager_install_uses_bash_for_portable_permissions(self):
+        source = (ROOT / "ssr.sh").read_text(encoding="utf-8")
+        self.assertIn('bash "$PROJECT_DIR/install.sh"', source)
+        self.assertIn('bash "$PROJECT_DIR/uninstall/uninstall.sh"', source)
+
     def test_main_script_version_command_is_noninteractive(self):
         p = subprocess.run(["bash", str(ROOT / "ssr.sh"), "--version"], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         self.assertEqual(p.returncode, 0, p.stderr)

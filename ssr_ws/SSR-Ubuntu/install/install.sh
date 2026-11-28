@@ -56,7 +56,7 @@ esac
 actual_sha=$(sha256sum "$SSR_CORE_ARCHIVE" | awk '{print $1}')
 [[ "${actual_sha,,}" == "${SSR_CORE_SHA256,,}" ]] || fail "核心 SHA256 不匹配；停止安装。"
 
-"$ROOT/install/dependencies.sh"
+bash "$ROOT/install/dependencies.sh"
 PYTHON_BIN=${SSR_PYTHON_BIN:-python3}
 
 CORE_STAGE_BASE=$(mktemp -d /usr/local/.ssr-core-stage.XXXXXX)
@@ -70,12 +70,34 @@ CORE_STAGE="$CORE_STAGE_BASE/core"
 # Verify syntax and import against the selected Python before committing the
 # new core directory. This is a smoke test, not an end-to-end client test.
 PYTHONPATH="$CORE_STAGE" "$PYTHON_BIN" - "$CORE_STAGE" <<'PY'
+import ctypes.util
 import pathlib, py_compile, sys
 root = pathlib.Path(sys.argv[1])
 for path in root.rglob("*.py"):
     py_compile.compile(str(path), doraise=True)
 import shadowsocks.server
+from shadowsocks.encrypt import Encryptor
+
+methods = [
+    "none", "rc4", "rc4-md5", "rc4-md5-6",
+    "aes-128-ctr", "aes-192-ctr", "aes-256-ctr",
+    "aes-128-cfb", "aes-192-cfb", "aes-256-cfb",
+    "aes-128-cfb8", "aes-192-cfb8", "aes-256-cfb8",
+]
+if ctypes.util.find_library("sodium"):
+    methods += ["salsa20", "chacha20", "chacha20-ietf"]
+else:
+    print("SSR crypto smoke test: libsodium not found; Salsa20/ChaCha20 checks skipped")
+
+payload = b"SSR-Ubuntu pinned-core install smoke test"
+for method in methods:
+    enc = Encryptor(b"SSR-Ubuntu-install-test", method)
+    dec = Encryptor(b"SSR-Ubuntu-install-test", method)
+    result = dec.decrypt(enc.encrypt(payload))
+    if result != payload:
+        raise SystemExit("SSR crypto round-trip failed: " + method)
 print("SSR core syntax/import smoke test: PASS")
+print("SSR crypto round-trip smoke test: PASS (%d methods)" % len(methods))
 PY
 mv -- "$CORE_STAGE" "$CORE_DIR"
 rmdir -- "$CORE_STAGE_BASE"
@@ -145,6 +167,7 @@ printf '系统：Ubuntu %s / %s\n' "$VERSION_ID" "$ARCH"
 printf '核心提交：%s\nSHA256：%s\n' "$SSR_CORE_COMMIT" "$actual_sha"
 printf '账号端口：2333\n初始密码：%s\n' "$password"
 printf '日志：journalctl -u ssr.service -f\n'
+printf '管理菜单：ssr.sh\n'
 printf '\n注意：服务以 -q 启动以抑制原核心 INFO 级明文密码日志；详细连接日志暂时关闭。\n'
 INSTALL_DONE=1
 

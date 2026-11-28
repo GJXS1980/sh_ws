@@ -2,8 +2,8 @@
 """Install a locally supplied, commit-pinned SSR manyuser archive.
 
 No network fetches and no protocol-core substitutions are performed here.
-The archive must be supplied with a 40-hex commit and a SHA256 from a trusted
-out-of-band source. The only source patch redacts a startup log line.
+The archive must be supplied with a 40-hex commit and a trusted SHA256.
+Only exact-match credential-log and OpenSSL 3 compatibility patches apply.
 """
 import argparse
 import hashlib
@@ -16,6 +16,8 @@ import stat
 import tarfile
 import tempfile
 import zipfile
+
+import patch_core_crypto
 
 REQUIRED = [
     "shadowsocks/server.py",
@@ -117,7 +119,8 @@ def main():
             raise RuntimeError("核心 setup.py 版本不是预期的 2.6.12（实际：%s）；拒绝安装未审查版本" % package_version)
         if not re.search(r"install_requires\s*=\s*\[\s*\]", setup_text):
             raise RuntimeError("setup.py 的 install_requires 不为空或格式未知；必须重新审查 Python 依赖后再部署")
-        patch_state = patch_log(core)
+        log_patch_state = patch_log(core)
+        crypto_patch_state = patch_core_crypto.patch_openssl3(core)
         # Normalize archive permissions: no setuid/setgid or world-writable code.
         for current, dirs, files in os.walk(core):
             os.chmod(current, 0o755)
@@ -126,18 +129,35 @@ def main():
                 if item.is_symlink():
                     raise RuntimeError("核心源码不允许包含符号链接：%s" % item)
                 os.chmod(item, 0o755 if item.suffix == ".sh" else 0o644)
-        patch_file = pathlib.Path(__file__).resolve().parents[1] / "patches" / "redact-server-password.patch"
-        patch_hash = hashlib.sha256(patch_file.read_bytes()).hexdigest() if patch_file.is_file() else "unavailable"
+        root = pathlib.Path(__file__).resolve().parents[1]
+        log_patch_file = root / "patches" / "redact-server-password.patch"
+        crypto_patch_file = root / "install" / "patch_core_crypto.py"
+        log_patch_hash = hashlib.sha256(log_patch_file.read_bytes()).hexdigest() if log_patch_file.is_file() else "unavailable"
+        crypto_patch_hash = hashlib.sha256(crypto_patch_file.read_bytes()).hexdigest()
         metadata = {
-            "repository": "https://github.com/ssrlive/shadowsocksr",
-            "branch_readme_clone_url": "https://github.com/ShadowsocksR-Live/shadowsocksr.git",
-            "branch_at_source": "manyuser",
+            "repository": "https://github.com/ssrlive/shadowsocksr.git",
+            "branch": "manyuser",
             "commit": args.commit.lower(),
             "archive_sha256": digest,
             "package_version": package_version,
             "python_install_requires": [],
             "archive_preparation": "git archive from the exact commit; see install/prepare-core-archive.sh",
-            "patches": [{"name": patch_state, "patch_file_sha256": patch_hash}],
+            "patches": [
+                {
+                    "name": log_patch_state,
+                    "patch_file": "patches/redact-server-password.patch",
+                    "patch_file_sha256": log_patch_hash,
+                    "target": "shadowsocks/server.py",
+                    "protocol_changes": False,
+                },
+                {
+                    "name": crypto_patch_state,
+                    "patch_file": "install/patch_core_crypto.py",
+                    "patch_file_sha256": crypto_patch_hash,
+                    "target": "shadowsocks/crypto/openssl.py",
+                    "protocol_changes": False,
+                },
+            ],
             "protocol_core_replaced": False,
         }
         (core / "SSR-UBUNTU-CORE-METADATA.json").write_text(json.dumps(metadata, indent=2) + "\n", encoding="utf-8")

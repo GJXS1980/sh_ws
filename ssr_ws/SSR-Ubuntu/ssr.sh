@@ -2,7 +2,7 @@
 # SSR-Ubuntu manager. The protocol core remains the original SSR manyuser core.
 set -Eeuo pipefail
 
-VERSION='0.1.1-blocked-core-pin'
+VERSION='0.2.0'
 CONFIG_FILE=${SSR_CONFIG_FILE:-/etc/shadowsocksr/user-config.json}
 CORE_DIR=${SSR_CORE_DIR:-/usr/local/shadowsocksr}
 UNIT='ssr.service'
@@ -86,7 +86,7 @@ system_summary() {
 
 install_ssr() {
     need_root || return
-    "$PROJECT_DIR/install/install.sh"
+    bash "$PROJECT_DIR/install.sh"
 }
 
 update_ssr() {
@@ -102,7 +102,7 @@ EOF
 
 uninstall_ssr() {
     need_root || return
-    "$PROJECT_DIR/uninstall/uninstall.sh"
+    bash "$PROJECT_DIR/uninstall/uninstall.sh"
 }
 
 libsodium_menu() {

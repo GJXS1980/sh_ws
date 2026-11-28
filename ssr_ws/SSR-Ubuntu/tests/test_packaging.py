@@ -26,7 +26,7 @@ class PackagingTests(unittest.TestCase):
             self.assertRegex(manager, re.compile(r"(?m)^\s*%d\." % n))
 
     def test_manager_python_modules_parse_as_python_38(self):
-        for rel in ("modules/config.py", "modules/link.py", "modules/connection.py", "install/core_install.py"):
+        for rel in ("modules/config.py", "modules/link.py", "modules/connection.py", "install/core_install.py", "install/patch_core_crypto.py"):
             source = (ROOT / rel).read_text(encoding="utf-8")
             ast.parse(source, filename=rel, feature_version=(3, 8))
 
@@ -41,8 +41,8 @@ class PackagingTests(unittest.TestCase):
 
     def test_required_delivery_files_exist(self):
         required = [
-            "ssr.sh", "README.md", "CHANGELOG.md", "install/install.sh",
-            "install/dependencies.sh", "install/core_install.py",
+            "ssr.sh", "install.sh", "README.md", "CHANGELOG.md", "install/install.sh",
+            "install/dependencies.sh", "install/core_install.py", "install/patch_core_crypto.py",
             "install/prepare-core-archive.sh", "modules/config.py",
             "modules/link.py", "modules/connection.py", "modules/firewall.sh",
             "modules/bbr.sh", "modules/qr.sh", "modules/service.sh", "modules/log.sh",
@@ -54,10 +54,21 @@ class PackagingTests(unittest.TestCase):
         for rel in required:
             self.assertTrue((ROOT / rel).is_file(), rel)
 
-    def test_manager_version_is_explicitly_blocked_until_core_pin(self):
+    def test_core_lock_contains_the_verified_commit_and_archive_hash(self):
+        lock = (ROOT / "core/CORE.lock").read_text(encoding="utf-8")
+        self.assertIn("CORE_COMMIT=046078c9568bee891f0ac74085ee82fc08e99e3e", lock)
+        self.assertIn("CORE_SHA256=32a5a0fe14749f34f14859660f29e2bf10bc0a9deb3b278a55d4b42154b2de40", lock)
+        self.assertIn("CORE_CLIENT_COMPATIBILITY=NOT_TESTED_END_TO_END", lock)
+
+    def test_manager_version_and_one_click_installer_are_present(self):
         p = subprocess.run(["bash", str(ROOT / "ssr.sh"), "--version"], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         self.assertEqual(p.returncode, 0, p.stderr)
-        self.assertIn("blocked-core-pin", p.stdout)
+        self.assertEqual(p.stdout.strip(), (ROOT / "VERSION").read_text(encoding="utf-8").strip())
+        installer = (ROOT / "install.sh").read_text(encoding="utf-8")
+        self.assertIn("CORE_COMMIT", installer)
+        self.assertIn("CORE_SHA256", installer)
+        self.assertIn("prepare-core-archive.sh", installer)
+        self.assertIn("bash \"$ROOT/install/install.sh\"", installer)
 
 
 if __name__ == "__main__":

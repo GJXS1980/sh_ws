@@ -15,12 +15,14 @@ export DEBIAN_FRONTEND=noninteractive
 apt-get update
 apt-get install -y ca-certificates python3 python3-venv iproute2 qrencode
 
-if apt-cache show libsodium23 2>/dev/null | grep -q '^Package: libsodium23$'; then
+if ldconfig -p 2>/dev/null | grep -q 'libsodium'; then
+    echo '[信息] 已发现 libsodium 动态库，跳过重复安装。'
+elif apt-cache show libsodium23 2>/dev/null | grep -q '^Package: libsodium23$'; then
     apt-get install -y libsodium23
 elif apt-cache show libsodium-dev 2>/dev/null | grep -q '^Package: libsodium-dev$'; then
     apt-get install -y libsodium-dev
 else
-    echo '[警告] 软件源未提供 libsodium23/libsodium-dev；Salsa20/ChaCha20 算法尚不可用。' >&2
+    echo '[警告] 当前软件源未提供 libsodium23/libsodium-dev；Salsa20/ChaCha20 可能不可用。' >&2
 fi
 
 PYTHON_BIN=${SSR_PYTHON_BIN:-python3}

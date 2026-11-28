@@ -36,4 +36,4 @@ The GitHub commit diff for this commit changes only `README.md` and `ssr-install
 
 **PASS: approve fixed-commit archive generation.** The user's local inspection verified the commit is the manyuser branch head at inspection time and printed the tree SHA. The project archive-preparation script independently fetches the manyuser history, verifies the selected commit is an ancestor of that branch, checks required source paths, and creates an archive from the exact commit.
 
-**BLOCKED: production deployment approval.** Archive SHA256 has not yet been generated; Python/OpenSSL/libsodium runtime compatibility and original-client end-to-end tests have not been run. Apply and verify the exact password-log redaction patch. Do not execute upstream `ssr-install.sh`.
+**固定归档与 Ubuntu 22.04 运行验证已完成；原客户端端到端兼容仍待验收。** 用户提供的 Vultr 实机日志记录了归档 SHA256 `32a5a0fe14749f34f14859660f29e2bf10bc0a9deb3b278a55d4b42154b2de40`、Python/OpenSSL/libsodium 加密测试、插件注册、配置管理、systemd 启动以及 TCP/UDP 2333 监听通过。OpenSSL 3 兼容补丁和启动日志脱敏补丁均由项目安装器精确匹配应用。原版 SSR 客户端真实连接和业务流量端到端结果仍为 `NOT TESTED END-TO-END`。不要执行上游 `ssr-install.sh`。

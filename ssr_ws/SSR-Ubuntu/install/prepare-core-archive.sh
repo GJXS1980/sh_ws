@@ -42,4 +42,4 @@ SHA=$(sha256sum "$ARCHIVE" | awk '{print $1}')
 TREE=$(git -C "$WORK" rev-parse "$COMMIT^{tree}")
 DATE=$(git -C "$WORK" show -s --format=%cI "$COMMIT")
 printf '核心仓库：%s\n固定提交：%s\n源码树：%s\n提交日期：%s\n压缩包：%s\nSHA256：%s\n' "$REPO_URL" "$FETCHED" "$TREE" "$DATE" "$ARCHIVE" "$SHA"
-printf '\n下一步：将上述 commit 与 SHA256 保存到受控发布记录；然后按 README 的 SSR_CORE_* 环境变量运行安装器。\n'
+printf '\n归档已生成。运行项目根目录的 sudo bash ./install.sh 即可自动校验此固定归档并继续安装。\n'

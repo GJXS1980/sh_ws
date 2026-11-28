@@ -56,9 +56,12 @@ def build(output):
         names = set(zf.namelist())
         required = {
             "SSR-Ubuntu/ssr.sh",
+            "SSR-Ubuntu/install.sh",
             "SSR-Ubuntu/README.md",
             "SSR-Ubuntu/original/ssr.sh.v2.0.38",
             "SSR-Ubuntu/install/core_install.py",
+            "SSR-Ubuntu/install/patch_core_crypto.py",
+            "SSR-Ubuntu/core/CORE.lock",
             "SSR-Ubuntu/core/CORE_PIN_STATUS.md",
             "SSR-Ubuntu/reports/test-report.md",
             "SSR-Ubuntu/MANIFEST.sha256",

@@ -1,38 +1,37 @@
-# SSR-Ubuntu 交付状态
+# SSR-Ubuntu 0.2.0 交付状态
 
-## 已包含在源码包中
+## 已包含
 
-- 原始用户上传脚本副本及 SHA256 校验记录；
-- Bash 菜单入口（保留 1～15 操作布局）；
-- Python3 JSON 配置管理模块；
-- SSR/SS 链接生成及本地二维码调用；
-- TCP 连接统计和可选 HTTPS IP 归属地查询；
-- systemd unit；
-- UFW/iptables 受限防火墙管理；原生 nftables 仅检测并提示人工处理；
-- BBR sysctl 管理；
-- 日志模式安全策略（详细 INFO 日志保持禁用）；
-- 安装依赖、核心固定提交归档准备、核心校验/补丁、卸载、迁移检测/备份/阻断/回滚；
-- 自动化测试、GitHub Actions 测试工作流、中文 README、CHANGELOG 和报告。
+- 固定 SSR manyuser Commit、Tree 和归档 SHA256。
+- 根目录一键安装入口 `install.sh`，自动获取固定 Commit 归档并校验 SHA256。
+- 精确日志脱敏补丁与 OpenSSL 3 RC4/provider、EVP context 生命周期补丁。
+- systemd 前台服务、专用 `ssr` 用户、随机初始密码和配置校验。
+- SSR/SS 链接生成、本地二维码、账号显示、单/多端口用户管理。
+- 配置备份/恢复、服务管理、TCP 连接统计、可选地理位置查询、防火墙和 BBR 模块。
+- 卸载、迁移检测/备份/回滚、测试套件和简化 README。
 
-## 明确未完成/不可宣称通过
+## 用户提供的实机验证记录
 
-1. 本交付不含 SSR manyuser 核心源码压缩包。核心候选来源已按用户指定更新为 `https://github.com/ssrlive/shadowsocksr/tree/manyuser`，但当前执行环境无法连接 GitHub Git transport 获取固定 commit/tree SHA 并独立核验归档 SHA256。
-2. 因缺少核心包，真实核心 Python/OpenSSL/libsodium 运行测试未完成。
-3. 未在 Ubuntu 20.04、22.04、24.04、26.04 VM 完成安装测试。
-4. 未在 ARM64 环境完成部署测试。
-5. 未使用原有 SSR 客户端和原有 SSR 链接完成旧/新环境对照连接。
-6. BT/PT/SPAM 封禁、详细连接日志、在线更新和生产迁移切换保持 BLOCKED。
+- Ubuntu 22.04.5 LTS / x86_64 / Python 3.10.12 / OpenSSL 3.0.2。
+- 核心归档 SHA256 校验通过，核心部署、编译和 import 通过。
+- 16 种加密算法各 50 次往返测试全部通过；协议插件 7/7、混淆插件 5/5。
+- 配置管理 CRUD、单/多端口转换、备份和字段保留通过。
+- 正式安装后 `ssr.service` active；TCP/UDP 2333 同时监听。
 
-## 使用限制
+这些是用户提供的服务器终端结果，不是当前构建容器对远端 VPS 的独立重跑。
 
-在固定 manyuser 核心 archive、commit、SHA256 准备好并通过核心安装器后，仍须在隔离 Ubuntu 测试机完成 `reports/compatibility.md` 的客户端回归矩阵。未完成之前，不建议把此版本用于生产迁移。
+## 未宣称完成
 
-## 源码包构建与完整性验证
+- 原版 SSR 客户端真实连接及实际代理流量端到端测试。
+- Ubuntu 20.04、24.04、26.04 和 ARM64 实机测试。
+- UFW、iptables-nft、原生 nftables 多种规则组合的全面集成测试。
+- 核心/管理器在线更新、BT/PT/SPAM 规则、详细连接日志和自动生产迁移。
 
-- 源码目录：`SSR-Ubuntu/`
-- ZIP 文件：`/mnt/data/SSR-Ubuntu-project.zip`
-- ZIP 文件包含 46 个条目，其中 45 个源文件由 `MANIFEST.sha256` 逐项校验。
-- ZIP CRC 检查：PASS。
-- 必需交付文件检查：PASS。
-- Python 缓存文件排除检查：PASS。
-- 注意：本 ZIP 是管理工具项目源码包；并未包含上游 SSR manyuser 核心归档。核心候选来源已改为用户指定的 ssrlive 仓库，并新增源码检查脚本；但核心归档因无法从当前构建环境取得并独立验证固定 commit/tree 与 SHA256，继续保持 BLOCKED。不得将此包描述为已完成 SSR 客户端端到端验收的生产安装包。
+源码 ZIP 不包含上游核心归档；一键安装时会从锁定 Commit 生成并校验。若目标服务器不能访问 GitHub，可手动放入已核验的固定归档。
+
+## 本次源码包验证
+
+- `bash tests/run.sh`：43 项单元测试全部通过。
+- Shell 语法、Python 编译、systemd unit 静态检查：PASS。
+- ZIP CRC、MANIFEST SHA256、必需文件和缓存排除：PASS。
+- ShellCheck：NOT TESTED（构建容器未安装）。
