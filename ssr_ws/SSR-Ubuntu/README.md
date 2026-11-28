@@ -29,6 +29,7 @@ SSR-Ubuntu/
 ├── install/
 │   ├── install.sh
 │   ├── dependencies.sh
+│   ├── inspect-core-source.sh
 │   ├── prepare-core-archive.sh
 │   └── core_install.py
 ├── modules/
@@ -60,12 +61,17 @@ SSR-Ubuntu/
 
 ## 3. 核心源码来源与固定版本要求
 
-原脚本指定的核心仓库：
+核心源码来源（按用户最新指定更新）：
 
-- 仓库：<https://github.com/ToyoDAdoubiBackup/shadowsocksr>
-- 原分支名：`manyuser`
-- 参考入口：`shadowsocks/server.py`
-- 原核心 `setup.py` 显示的包版本：`2.6.12`；公开分支的 `install_requires=[]`，但 classifiers 仅列 Python 3.3/3.4，因此不能视为 Python 3.8+ 的兼容保证。固定归档中必须重新核实。
+- 仓库入口：<https://github.com/ssrlive/shadowsocksr>
+- 分支：`manyuser`
+- 该分支 README 中给出的 clone URL：`https://github.com/ShadowsocksR-Live/shadowsocksr.git`
+- 本项目归档脚本固定使用用户提供的仓库 URL：`https://github.com/ssrlive/shadowsocksr.git`
+- 本项目沿用原 Toyo `ssr.sh v2.0.38` 的运行方式，实际服务入口仍是仓库中的 `shadowsocks/server.py`，不擅自切换到仓库根目录的数据库/API 管理入口 `server.py`。
+- 当前可见 `setup.py` 的 Python 包版本字段为 `2.6.12`；`CHANGES` 顶部记录 SSR 代码版本 `3.4.0`（2017-07-27）。两者属于不同版本标识，不应混为一谈。
+- `setup.py` 的 classifiers 只列 Python 3.3/3.4 等旧版本；这不是 Python 3.8/3.10/3.12/3.13 兼容保证。
+
+**来源变更说明：** 用户提供的 `ssrlive/shadowsocksr` 与原脚本历史下载地址 `ToyoDAdoubiBackup/shadowsocksr` 是不同仓库标识。本项目现在将前者作为待固定、待验证的目标来源，但在完成两仓库源码差异审查和客户端回归前，不宣称它与 Toyo 原始下载内容逐字节相同，也不宣称已经通过客户端兼容验收。
 
 **不要使用 `archive/manyuser.zip` 作为正式安装版本。** 该 URL 指向可变分支，不是固定版本。
 
@@ -76,16 +82,24 @@ SSR-Ubuntu/
 3. 对生成的 archive 计算并独立保存 SHA256；
 4. archive 顶层目录必须严格为 `shadowsocksr-<commit>`。
 
-可在能访问 GitHub 的机器上运行下面的准备脚本。它使用 Git 默认 HTTPS 证书验证，fetch 指定 commit，再由 `git archive` 从该 commit 生成归档；它不执行上游代码，也不跟随 `manyuser` 浮动分支：
+先在能访问 GitHub 的机器上解析并审查当前分支头：
 
 ```bash
 sudo apt-get install -y git
+bash install/inspect-core-source.sh
+```
+
+该脚本会显示实际解析出的 40 位 commit、tree SHA、提交日期、`setup.py` 包版本、`CHANGES` 顶部版本，并检查关键源码文件；它只 fetch 源码，不执行上游安装脚本。人工确认后，再用输出的 commit 生成固定归档：
+
+```bash
 bash install/prepare-core-archive.sh /root/ssr-core-source <40位commit SHA>
 ```
 
+归档脚本使用 Git 默认 HTTPS 证书验证，检查 commit 属于 `manyuser` 分支历史，再由 `git archive` 从该 commit 生成归档；不执行上游代码，也不跟随浮动分支。**当前对话环境无法连接 GitHub Git 服务，因此尚未替用户实取 commit/tree SHA 和归档 SHA256。**
+
 脚本会输出 archive 路径和 SHA256。请在受控记录中保存这两个值，并在目标服务器核对。当前项目没有取得一个可独立核验的上游 commit 和 archive SHA256，因此没有把任何核心压缩包伪装成已验证版本。
 
-`install/core_install.py` 会检查 SHA256、归档顶层目录、核心文件清单、`setup.py` 版本 `2.6.12` 及空 `install_requires`，并仅对 `server.py` 启动日志中的密码/obfs 参数进行精确匹配脱敏补丁。补丁无法精确匹配时会拒绝安装。不会关闭 TLS 证书校验，不会替换代理核心。
+`install/core_install.py` 会检查 SHA256、归档顶层目录、核心文件清单、`setup.py` 版本 `2.6.12` 及空 `install_requires`，并仅对 `shadowsocks/server.py` 启动日志中的密码/obfs 参数进行精确匹配脱敏补丁。补丁无法精确匹配时会拒绝安装。不会关闭 TLS 证书校验，不会替换代理核心。用户提供仓库的 README 还引用了旧式一键安装脚本；该脚本含浮动分支 clone、`--no-check-certificate`、固定默认密码和 init.d/rc.local 管理，不属于本项目可信安装流程，严禁直接执行。
 
 ## 4. 安装方式
 
@@ -239,6 +253,7 @@ sudo bash migration/rollback.sh /root/ssr-migration-backups/ssr-YYYYMMDD-HHMMSS
 
 - `reports/source-audit.md`
 - `reports/compatibility.md`
+- `reports/upstream-core-audit-ssrlive.md`
 - `reports/test-report.md`
 - `reports/delivery-status.md`
 - `CHANGELOG.md`
@@ -254,3 +269,21 @@ python3 tools/build-package.py --output /mnt/data/SSR-Ubuntu-project.zip
 ```
 
 脚本会生成 `MANIFEST.sha256`、创建 ZIP、检查 CRC、必需交付文件和 Python 缓存排除情况，并输出 ZIP SHA256。
+
+## 核心源码固定版本（已审核候选 Commit）
+
+当前候选核心已锁定到 `ssrlive/shadowsocksr` 的 manyuser 提交：
+
+- Commit：`046078c9568bee891f0ac74085ee82fc08e99e3e`
+- Tree：`7c6884129710e658047c1c89ce17990d53f4af1c`
+- `setup.py` 版本：`2.6.12`
+- `CHANGES` 顶部版本：`3.4.0`
+
+该提交已通过源码入口、多端口结构和 daemon 行为的初步人工审核，**批准生成固定 Commit 归档，但不代表生产部署或原客户端兼容性验收通过**。归档 SHA256 需在可访问 GitHub 的构建机上实际生成。
+
+```bash
+bash install/prepare-core-archive.sh /root/ssr-core-source 046078c9568bee891f0ac74085ee82fc08e99e3e
+```
+
+不要执行归档内的上游 `ssr-install.sh`。部署前必须应用日志脱敏补丁，并完成 Python/加密库和原 SSR 客户端回归测试。详见 `core/CORE_PIN_STATUS.md` 与 `reports/upstream-core-audit-ssrlive.md`。
+

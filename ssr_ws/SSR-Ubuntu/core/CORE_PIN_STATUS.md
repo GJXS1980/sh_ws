@@ -1,36 +1,46 @@
 # SSR manyuser 核心固定版本状态
 
-**SOURCE IDENTIFIED / PIN NOT YET VERIFIED**
+**COMMIT PINNED / ARCHIVE SHA256 PENDING / CLIENT TEST NOT TESTED**
 
-- 用户指定仓库：`https://github.com/ssrlive/shadowsocksr`
+## 已审核的候选核心
+
+- 仓库：`https://github.com/ssrlive/shadowsocksr.git`
 - 分支：`manyuser`
-- README 中列出的 clone URL：`https://github.com/ShadowsocksR-Live/shadowsocksr.git`
-- 实际服务入口（沿用 Toyo v2.0.38 管理脚本）：`shadowsocks/server.py`
-- 公开 `setup.py` 包版本字段：`2.6.12`
-- 公开 `CHANGES` 顶部 SSR 版本：`3.4.0`，日期 `2017-07-27`
-- 当前 commit SHA：**未取得/未验证**
-- 当前 tree SHA：**未取得/未验证**
-- 当前归档 SHA256：**未取得/未验证**
-- 核心源码是否随本项目打包：**否**
-- 原 SSR 客户端端到端回归：**NOT TESTED**
+- 固定 Commit：`046078c9568bee891f0ac74085ee82fc08e99e3e`
+- Tree SHA：`7c6884129710e658047c1c89ce17990d53f4af1c`
+- 提交日期：`2022-12-18T20:57:50+08:00`（用户本机 Git 输出）
+- 提交说明：`script issues`
+- `setup.py` 包版本：`2.6.12`
+- `CHANGES` 顶部 SSR 版本：`3.4.0`（2017-07-27）
+- 核心入口：`shadowsocks/server.py`
+- 核心服务管理调用：`daemon.daemon_exec(config)`
+- 多端口映射：`port_password`
+- 归档文件：**尚未生成**
+- 归档 SHA256：**尚未生成，不得填写猜测值**
+- 原 SSR 客户端端到端回归：`NOT TESTED`
 
-## 已核对的上游源码事实
+## 人工审核结论
 
-1. `setup.py` 报告 Python 包版本 `2.6.12`，`install_requires=[]`，旧 classifier 只声明 Python 3.3/3.4 等历史版本。
-2. `CHANGES` 顶部记录 SSR 3.4.0（2017-07-27），包含 `auth_chain_b`、`initmudbjson.sh` 和运行时速度限制相关更新。
-3. `shadowsocks/server.py` 调用 `daemon.daemon_exec(config)`，按 `port_password` 创建 TCPRelay 和 UDPRelay；其 INFO 启动日志会输出明文 password 和 obfs_param，需要精确日志脱敏。
-4. 仓库根目录还存在另一套多用户 API/数据库管理入口。为保持原 Toyo `ssr.sh v2.0.38` 的部署语义，本项目只将 `shadowsocks/server.py` 作为服务入口，不擅自切换根目录 API/数据库管理服务。
-5. 上游 README 引用的 `ssr-install.sh` 是旧式安装器；它使用浮动 manyuser 分支、关闭 wget 证书验证、设置固定默认密码并部署 init.d/rc.local。本项目不调用该脚本。
+**允许执行固定 Commit 归档生成；暂不批准生产部署。**
 
-## 固定版本操作
+审核依据：
 
-在能够访问 GitHub 的受控 Linux 构建机上执行：
+1. GitHub API 能解析该 Commit，提交说明为 `script issues`，提交作者/提交者为 `ssrlive`。
+2. 该 Commit 的 diff 仅涉及 `README.md` 和 `ssr-install.sh`：把旧安装来源/分支切换为 manyuser。核心 Python 源码仍由该 Commit 的 tree 固定，因此可作为归档输入；但这也意味着不能把该 Commit 描述为一次核心协议实现更新。
+3. `setup.py` 的 `version` 为 `2.6.12`，`install_requires=[]`；这不代表已验证 Python 3.8/3.10/3.12/3.13 运行兼容性。
+4. `CHANGES` 顶部为 SSR 3.4.0（2017-07-27），其中记录 `auth_chain_b`、`initmudbjson.sh` 和运行时速度限制相关更新。
+5. `server.py` 调用 `daemon.daemon_exec(config)`。`daemon.py` 只有在配置含 `daemon` 字段时才 fork；本项目 systemd runtime 配置移除 `daemon`、`pid-file`、`log-file`、`user`，所以预期由 systemd 直接管理前台主进程。
+6. `server.py` 启动日志存在明文密码和 `obfs_param` 输出。本项目日志脱敏补丁与该固定源码行匹配；部署前必须应用补丁，并验证补丁只修改日志、不改协议处理。
+7. `ssr-install.sh` 仍属于上游旧式安装脚本，不应执行。本项目只使用固定 commit 的源码归档，不调用上游安装器。
+
+## 下一步：生成固定归档
+
+在用户的 GitHub 可访问构建机上运行：
 
 ```bash
-bash install/inspect-core-source.sh
-bash install/prepare-core-archive.sh /root/ssr-core-source <上一步显示的40位commit>
+bash install/prepare-core-archive.sh /root/ssr-core-source 046078c9568bee891f0ac74085ee82fc08e99e3e
 ```
 
-第二条命令会检查提交属于 `manyuser` 分支历史，确认核心关键文件存在，并生成固定 commit 的归档和 SHA256。将 commit、tree SHA、归档 SHA256 写入受控发布记录；不要手工编造值。
+脚本会重新验证该 Commit 属于 `manyuser` 分支历史、检查核心关键文件、使用 `git archive` 生成固定归档并计算 SHA256。执行后将实际输出的归档路径和 SHA256 保存到发布记录，再运行核心安装器的离线校验/补丁/语法导入测试。
 
-本次执行容器不能解析 GitHub 域名，因此没有在本包中放入浮动分支 archive，也没有捏造 commit 或 SHA256。核心安装器仍 fail-closed。新仓库与历史 Toyo 备份仓库之间的逐文件 diff、Python/加密算法兼容实测和原 SSR 客户端回归仍需完成。
+**不要执行 `ssr-install.sh`，不要用分支 ZIP 替代固定 Commit 归档。**

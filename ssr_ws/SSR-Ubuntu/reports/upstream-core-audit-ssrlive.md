@@ -1,25 +1,39 @@
-# 用户指定 ssrlive manyuser 上游源码审查（公开文件核对）
+# ssrlive/shadowsocksr manyuser 固定提交审核报告
 
-## 来源
+审核对象：`046078c9568bee891f0ac74085ee82fc08e99e3e`
 
-- 用户给定页面：<https://github.com/ssrlive/shadowsocksr/tree/manyuser>
-- README 中自述的 clone 地址：<https://github.com/ShadowsocksR-Live/shadowsocksr.git>
+## 提交身份
+
+- 仓库：`https://github.com/ssrlive/shadowsocksr`
 - 分支：`manyuser`
+- Commit：`046078c9568bee891f0ac74085ee82fc08e99e3e`
+- Tree：`7c6884129710e658047c1c89ce17990d53f4af1c`（来自用户本机 `git rev-parse` 输出）
+- 时间：`2022-12-18T20:57:50+08:00`（来自用户本机 Git 输出）
+- Subject：`script issues`
+- GitHub commit 页面：<https://github.com/ssrlive/shadowsocksr/commit/046078c9568bee891f0ac74085ee82fc08e99e3e>
 
-## 已通过公开文件核对的事实
+## 源码检查
 
-- `setup.py`：Python 包名 `shadowsocks`，包版本 `2.6.12`，`install_requires=[]`，旧 classifier 列出 Python 3.3/3.4。
-- `CHANGES`：顶部为 SSR 版本 `3.4.0`，日期 `2017-07-27`；列出 `auth_chain_b`、`initmudbjson.sh`、运行时速度限制等变更。
-- `shadowsocks/server.py`：调用 `daemon.daemon_exec(config)`；处理 `port_password` 字典；每个端口创建 TCPRelay 和 UDPRelay；启动 INFO 日志包含明文 password 和 obfs_param。
-- 仓库根目录 `server.py` 是另一个 API/数据库用户管理线程入口。为了忠实沿用用户提供的 Toyo v2.0.38 管理脚本，本项目继续以 `shadowsocks/server.py` 为 SSR 服务入口，不擅自切换根目录服务。
-- README 展示旧式 `ssr-install.sh` 安装方式；该脚本内容包含浮动分支 git clone、`wget --no-check-certificate`、固定默认密码、旧 init.d/rc.local 管理。SSR-Ubuntu 不执行此安装脚本，只取其源码仓库作为待固定核心来源。
+- `setup.py` blob：`50a38081a3f46790372e44929870881d5c916588`
+- `setup.py` package version：`2.6.12`
+- `setup.py` `install_requires=[]`
+- `CHANGES` blob：`0cd91768ea269287ddf6244e23443016d5a7a6a6`
+- `CHANGES` top version：`3.4.0 2017-07-27`
+- `shadowsocks/server.py` blob：`5bd0d03a33b01ba7ad8434088f4441757a98fca8`
+- `shadowsocks/daemon.py` blob：`8dc5608d111e36e7b4a673c7ab3c6627a0e502d7`
+- `shadowsocks/shell.py` blob：`2c802a33a4bdeb02259cad8caf8d120eda919068`
+- `shadowsocks/obfs.py` blob：`3dfdb141f11c264ddd46e5cfc802fd1fc87026d7`
+- `shadowsocks/encrypt.py` blob：`75efe0666e56339f9959b02d55dd84c289705a2a`
+- `server.py` calls `daemon.daemon_exec(config)` and uses `port_password` to build TCP/UDP relay instances.
+- `daemon.py` only forks when `daemon` is present in config. The project's generated runtime config removes `daemon`, `pid-file`, `log-file`, and `user` for systemd foreground management.
+- The startup log writes plaintext `password` and `obfs_param`; redact before deployment.
 
-## 尚未核实
+## Commit diff assessment
 
-- GitHub Git transport 当前分支头对应的真实 commit SHA 和 tree SHA。
-- `ssrlive/shadowsocksr` 与 `ToyoDAdoubiBackup/shadowsocksr` 对应 manyuser 分支之间的逐文件差异。
-- 固定 commit 的完整归档 SHA256。
-- 固定核心在 Ubuntu 20.04/22.04/24.04/26.04 的运行兼容性。
-- 原 SSR 客户端的同链接 TCP/UDP/IPv4/IPv6 回归。
+The GitHub commit diff for this commit changes only `README.md` and `ssr-install.sh`, switching installation instructions from branch `old` to branch `manyuser`. It does not itself change the protocol implementation files. The commit still identifies a concrete repository tree and is suitable as a reproducible archive source, but must not be described as a protocol-core code update.
 
-本执行环境无法解析 github.com，因此没有虚构 SHA 值。请在能访问 GitHub 的机器上运行 `install/inspect-core-source.sh` 和 `install/prepare-core-archive.sh`，然后把 commit/tree/archive SHA256 记录在正式发布清单中。
+## Safety decision
+
+**PASS: approve fixed-commit archive generation.** The user's local inspection verified the commit is the manyuser branch head at inspection time and printed the tree SHA. The project archive-preparation script independently fetches the manyuser history, verifies the selected commit is an ancestor of that branch, checks required source paths, and creates an archive from the exact commit.
+
+**BLOCKED: production deployment approval.** Archive SHA256 has not yet been generated; Python/OpenSSL/libsodium runtime compatibility and original-client end-to-end tests have not been run. Apply and verify the exact password-log redaction patch. Do not execute upstream `ssr-install.sh`.
