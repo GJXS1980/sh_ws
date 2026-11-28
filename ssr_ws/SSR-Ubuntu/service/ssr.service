@@ -1,0 +1,27 @@
+[Unit]
+Description=ShadowsocksR manyuser server (SSR-Ubuntu manager)
+Documentation=https://github.com/ToyoDAdoubiBackup/shadowsocksr
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ssr
+Group=ssr
+WorkingDirectory=/usr/local/shadowsocksr/shadowsocks
+RuntimeDirectory=ssr-ubuntu
+RuntimeDirectoryMode=0750
+ExecStartPre=/usr/local/shadowsocksr/venv/bin/python /usr/local/libexec/ssr-ubuntu/config.py runtime --source /etc/shadowsocksr/user-config.json --output /run/ssr-ubuntu/runtime-config.json
+ExecStart=/usr/local/shadowsocksr/venv/bin/python /usr/local/shadowsocksr/shadowsocks/server.py -q -c /run/ssr-ubuntu/runtime-config.json
+Restart=on-failure
+RestartSec=3
+KillMode=mixed
+TimeoutStopSec=20
+NoNewPrivileges=true
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+ProtectHome=true
+UMask=0027
+
+[Install]
+WantedBy=multi-user.target
